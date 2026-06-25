@@ -175,11 +175,31 @@ export interface ChannelsConfig {
 /**
  * 连接测试结果
  */
+export type ChannelTestErrorType =
+  | 'auth'
+  | 'permission'
+  | 'not_found'
+  | 'rate_limit'
+  | 'quota'
+  | 'bad_request'
+  | 'server'
+  | 'network'
+  | 'timeout'
+  | 'unknown'
+
 export interface ChannelTestResult {
   /** 是否成功 */
   success: boolean
   /** 结果消息 */
   message: string
+  /** 归一化错误类型，成功时为空 */
+  errorType?: ChannelTestErrorType
+  /** HTTP 状态码，网络或超时异常时为空 */
+  statusCode?: number
+  /** 供应商原始错误摘要，已截断 */
+  rawSummary?: string
+  /** 是否适合稍后重试 */
+  retriable?: boolean
 }
 
 /**

@@ -25,10 +25,27 @@ import { PROVIDER_DEFAULT_URLS } from '@proma/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { normalizeBaseUrl, normalizeAnthropicProviderUrl, getPromaUserAgent } from '@proma/core'
+import {
+  normalizeChannelTestException,
+  normalizeChannelTestResponse,
+} from './channel-test-normalizer'
 import pkg from '../../../package.json' with { type: 'json' }
 
 /** 当前配置版本 */
 const CONFIG_VERSION = 1
+/** 连接测试超时时间 */
+const CHANNEL_TEST_TIMEOUT_MS = 15_000
+
+async function fetchForChannelTest(
+  fetchFn: typeof globalThis.fetch,
+  input: string,
+  init: RequestInit,
+): Promise<Response> {
+  return fetchFn(input, {
+    ...init,
+    signal: AbortSignal.timeout(CHANNEL_TEST_TIMEOUT_MS),
+  })
+}
 
 /**
  * 读取渠道配置文件
@@ -290,8 +307,7 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
         return { success: false, message: `不支持的供应商: ${channel.provider}。你可能过去使用的是 Proma 商业版，请重新下载商业版覆盖安装，当前版本为开源版本。` }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误'
-    return { success: false, message: `连接测试失败: ${message}` }
+    return normalizeChannelTestException(error)
   }
 }
 
@@ -355,7 +371,7 @@ async function testAnthropicCompatible(
     headers.Authorization = `Bearer ${apiKey}`
   }
 
-  const response = await fetchFn(`${url}/messages`, {
+  const response = await fetchForChannelTest(fetchFn, `${url}/messages`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -365,17 +381,7 @@ async function testAnthropicCompatible(
     }),
   })
 
-  if (response.ok) {
-    return { success: true, message: '连接成功' }
-  }
-
-  if (response.status === 401) {
-    const text = await response.text().catch(() => '')
-    return { success: false, message: `API Key 无效${text ? `: ${text.slice(0, 150)}` : ''}` }
-  }
-
-  // 如果能收到 API 的响应（即使是错误），说明连接是通的
-  return { success: true, message: '连接成功' }
+  return normalizeChannelTestResponse(response)
 }
 
 /**
@@ -385,23 +391,14 @@ async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: 
   const url = normalizeBaseUrl(baseUrl)
   const fetchFn = getFetchFn(proxyUrl)
 
-  const response = await fetchFn(`${url}/models`, {
+  const response = await fetchForChannelTest(fetchFn, `${url}/models`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
   })
 
-  if (response.ok) {
-    return { success: true, message: '连接成功' }
-  }
-
-  if (response.status === 401) {
-    return { success: false, message: 'API Key 无效' }
-  }
-
-  const text = await response.text().catch(() => '')
-  return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}` }
+  return normalizeChannelTestResponse(response)
 }
 
 /**
@@ -411,20 +408,11 @@ async function testGoogle(baseUrl: string, apiKey: string, proxyUrl?: string): P
   const url = normalizeBaseUrl(baseUrl)
   const fetchFn = getFetchFn(proxyUrl)
 
-  const response = await fetchFn(`${url}/v1beta/models?key=${apiKey}`, {
+  const response = await fetchForChannelTest(fetchFn, `${url}/v1beta/models?key=${apiKey}`, {
     method: 'GET',
   })
 
-  if (response.ok) {
-    return { success: true, message: '连接成功' }
-  }
-
-  if (response.status === 400 || response.status === 403) {
-    return { success: false, message: 'API Key 无效' }
-  }
-
-  const text = await response.text().catch(() => '')
-  return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}` }
+  return normalizeChannelTestResponse(response)
 }
 
 // ===== 直接测试连接 =====
@@ -463,8 +451,7 @@ export async function testChannelDirect(input: FetchModelsInput): Promise<Channe
         return { success: false, message: `不支持的提供商: ${input.provider}` }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误'
-    return { success: false, message: `连接测试失败: ${message}` }
+    return normalizeChannelTestException(error)
   }
 }
 

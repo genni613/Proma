@@ -592,7 +592,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                 testResult.success ? 'text-emerald-600' : 'text-destructive'
               )}>
                 {testResult.success ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
-                <span>{testResult.message}</span>
+                <span className="min-w-0 break-all">{testResult.message}</span>
               </div>
             )}
           </div>
