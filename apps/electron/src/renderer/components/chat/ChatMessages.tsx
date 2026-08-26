@@ -49,6 +49,11 @@ import { getModelLogo, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { tabMinimapCacheAtom } from '@/atoms/tab-atoms'
+import type { TabMinimapItem } from '@/atoms/tab-atoms'
+import {
+  getChatMessageSearchText,
+  toMessageNavigationPreviewItems,
+} from '@/lib/message-navigation-search'
 import type { ChatMessage, ChatToolActivity } from '@proma/shared'
 
 // ===== 滚动到顶部加载更多 =====
@@ -210,6 +215,7 @@ export function ChatMessages({
 
   /** 是否正在加载更多历史 */
   const [loadingMore, setLoadingMore] = React.useState(false)
+  const loadingMoreRef = React.useRef(false)
 
   /**
    * 流式完成过渡：streaming 结束到持久化消息加载完成之间，
@@ -297,12 +303,17 @@ export function ChatMessages({
 
   /** 加载更多历史消息 */
   const handleLoadMore = React.useCallback(async () => {
-    if (!onLoadMore || loadingMore || !hasMore) return
+    if (!onLoadMore || loadingMoreRef.current || !hasMore) return
 
+    loadingMoreRef.current = true
     setLoadingMore(true)
-    await onLoadMore()
-    setLoadingMore(false)
-  }, [onLoadMore, loadingMore, hasMore])
+    try {
+      await onLoadMore()
+    } finally {
+      loadingMoreRef.current = false
+      setLoadingMore(false)
+    }
+  }, [onLoadMore, hasMore])
 
   // 并排模式：自动加载全部历史消息（并排视图需要完整上下文）
   React.useEffect(() => {
@@ -313,26 +324,37 @@ export function ChatMessages({
 
   // 迷你地图数据（必须在所有条件分支之前调用，遵守 hooks 规则）
   const minimapItems: MinimapItem[] = React.useMemo(
-    () => messages.map((m) => ({
-      id: m.id,
-      role: m.role as MinimapItem['role'],
-      preview: m.content.slice(0, 200),
-      avatar: m.role === 'user' ? userProfile.avatar : undefined,
-      model: m.model,
-    })),
+    () => messages.map((m) => {
+      const role = m.role as MinimapItem['role']
+      const searchText = getChatMessageSearchText(m.content, role)
+      return {
+        id: m.id,
+        role,
+        preview: searchText.slice(0, 200),
+        searchText,
+        avatar: m.role === 'user' ? userProfile.avatar : undefined,
+        model: m.model,
+      }
+    }),
     [messages, userProfile.avatar]
+  )
+
+  // Tab 悬浮预览只缓存轻量摘要，完整搜索正文仅保留在当前 Session 组件中。
+  const tabMinimapItems = React.useMemo<TabMinimapItem[]>(
+    () => toMessageNavigationPreviewItems(minimapItems),
+    [minimapItems],
   )
 
   // 同步 minimap 缓存到 Tab 级别（供 Tab hover 预览使用）
   React.useEffect(() => {
-    if (minimapItems.length > 0) {
+    if (tabMinimapItems.length > 0) {
       setMinimapCache((prev) => {
         const next = new Map(prev)
-        next.set(conversationId, minimapItems)
+        next.set(conversationId, tabMinimapItems)
         return next
       })
     }
-  }, [conversationId, minimapItems, setMinimapCache])
+  }, [conversationId, tabMinimapItems, setMinimapCache])
 
   // 并排模式
   if (parallelMode) {
@@ -444,7 +466,12 @@ export function ChatMessages({
           </>
         )}
       </ConversationContent>
-      <ScrollMinimap items={minimapItems} />
+      <ScrollMinimap
+        items={minimapItems}
+        hasMoreHistory={hasMore}
+        loadingHistory={loadingMore}
+        onLoadFullHistory={handleLoadMore}
+      />
       <ConversationScrollButton />
     </Conversation>
   )

@@ -11,7 +11,7 @@ import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { AlertTriangle, Search } from 'lucide-react'
+import { AlertTriangle, Loader2, Search } from 'lucide-react'
 import { useStickToBottomContext } from 'use-stick-to-bottom'
 import { Input } from '@/components/ui/input'
 import { UserAvatar } from '@/components/chat/UserAvatar'
@@ -19,21 +19,34 @@ import { getModelLogo, resolveModelProvider } from '@/lib/model-logo'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { useShortcut } from '@/hooks/useShortcut'
 import { cn } from '@/lib/utils'
+import {
+  filterMessageNavigationItems,
+  getMessageNavigationDisplayText,
+  isMessageNavigationAvailable,
+} from '@/lib/message-navigation-search'
+import { createSessionHistorySearchLoader } from '@/lib/session-history-search-loader'
 
 export interface MinimapItem {
   id: string
   role: 'user' | 'assistant' | 'status'
+  /** 导航列表默认展示的轻量摘要。 */
   preview: string
+  /** 当前消息或 turn 的完整可见正文，仅供当前 Session 搜索。 */
+  searchText: string
   avatar?: string
   model?: string
 }
 
 interface ScrollMinimapProps {
   items: MinimapItem[]
+  /** Chat 首次只加载最近消息；为 true 时仍允许打开当前 Session 搜索。 */
+  hasMoreHistory?: boolean
+  /** 是否正在加载当前 Chat 的完整历史。 */
+  loadingHistory?: boolean
+  /** 加载当前 Chat 的完整历史，供 Session 范围搜索使用。 */
+  onLoadFullHistory?: () => Promise<void>
 }
 
-/** 最少消息数才显示迷你地图 */
-const MIN_ITEMS = 1
 /** 迷你地图最多渲染的横杠数 */
 const MAX_BARS = 20
 /** 迷你地图横杠垂直间距（px） */
@@ -74,7 +87,12 @@ function escapeRegExp(str: string): string {
 
 // ── 主组件 ──
 
-export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement | null {
+export function ScrollMinimap({
+  items,
+  hasMoreHistory = false,
+  loadingHistory = false,
+  onLoadFullHistory,
+}: ScrollMinimapProps): React.ReactElement | null {
   const { scrollRef, stopScroll, state: stickyState } = useStickToBottomContext()
   const [hovered, setHovered] = React.useState(false)
   const [isLeaving, setIsLeaving] = React.useState(false)
@@ -83,6 +101,7 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
   const [centerVisibleId, setCenterVisibleId] = React.useState<string | undefined>(undefined)
   const [canScroll, setCanScroll] = React.useState(false)
   const [searchQuery, setSearchQuery] = React.useState('')
+  const [historyLoadError, setHistoryLoadError] = React.useState<string | null>(null)
   const [isDragging, setIsDragging] = React.useState(false)
   const [scrollMetrics, setScrollMetrics] = React.useState({ scrollTop: 0, scrollHeight: 1, clientHeight: 1 })
   const closeTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
@@ -91,6 +110,8 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
   const searchInputRef = React.useRef<HTMLInputElement>(null)
   const trackRef = React.useRef<HTMLDivElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
+  const historyLoaderRef = React.useRef(createSessionHistorySearchLoader())
+  const navigationVersionRef = React.useRef(0)
 
   // ── 组件卸载时清理计时器 ──
 
@@ -181,15 +202,43 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
 
   // ── Cmd+F / Ctrl+F 快捷键：打开面板并聚焦搜索 ──
 
+  /** 加载完整 Chat 历史，并在旧消息插入顶部后保持当前阅读位置。 */
+  const ensureFullHistory = React.useCallback(() => {
+    if (!hasMoreHistory || !onLoadFullHistory) return
+
+    const el = scrollRef.current
+    setHistoryLoadError(null)
+
+    void historyLoaderRef.current
+      .load({
+        loadHistory: onLoadFullHistory,
+        captureScrollSnapshot: () => ({
+          scrollHeight: el?.scrollHeight ?? 0,
+          scrollTop: el?.scrollTop ?? 0,
+          navigationVersion: navigationVersionRef.current,
+        }),
+        getScrollContainer: () => el,
+        getNavigationVersion: () => navigationVersionRef.current,
+        scheduleAfterLayout: (callback) => requestAnimationFrame(callback),
+      })
+      .catch((error) => {
+        console.error('[消息导航] 加载完整会话历史失败:', error)
+        setHistoryLoadError('完整会话历史加载失败，请重试')
+      })
+  }, [hasMoreHistory, onLoadFullHistory, scrollRef])
+
   const handleShortcutOpen = React.useCallback(() => {
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
     if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current)
     if (openTimerRef.current) { clearTimeout(openTimerRef.current); openTimerRef.current = undefined }
     setIsLeaving(false)
     setHovered(true)
-  }, [])
+    ensureFullHistory()
+  }, [ensureFullHistory])
 
-  useShortcut('file-find', handleShortcutOpen, items.length >= MIN_ITEMS && canScroll)
+  const navigationAvailable = isMessageNavigationAvailable(items.length)
+  const showMinimapControls = canScroll || hasMoreHistory
+  useShortcut('file-find', handleShortcutOpen, navigationAvailable)
 
   // ── 鼠标进出控制（仅迷你地图区域） ──
 
@@ -241,6 +290,7 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
     )
     if (!target) return
 
+    navigationVersionRef.current += 1
     stopScroll()
     stickyState.animation = undefined
     stickyState.velocity = 0
@@ -259,11 +309,16 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
 
   // ── 搜索过滤 ──
 
-  const filteredItems = React.useMemo(() => {
-    if (!searchQuery.trim()) return items
-    const q = searchQuery.toLowerCase()
-    return items.filter((item) => item.preview.toLowerCase().includes(q))
-  }, [items, searchQuery])
+  const filteredItems = React.useMemo(
+    () => filterMessageNavigationItems(items, searchQuery),
+    [items, searchQuery],
+  )
+
+  const handleSearchChange = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const nextQuery = event.target.value
+    setSearchQuery(nextQuery)
+    if (nextQuery.trim()) ensureFullHistory()
+  }, [ensureFullHistory])
 
   /** 列表居中锚点：优先用主区视口中心对应的消息；该消息被搜索过滤掉时退回第一条可见消息 */
   const anchorId = React.useMemo(() => {
@@ -341,7 +396,7 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
     el.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' })
   }, [scrollRef, stopScroll, stickyState])
 
-  if (items.length < MIN_ITEMS || !canScroll) return null
+  if (!navigationAvailable) return null
 
   // ── 迷你地图条纹 ──
 
@@ -388,7 +443,7 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
                   ref={searchInputRef}
                   placeholder="搜索消息..."
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={handleSearchChange}
                   onFocus={() => {
                     if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
                     if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current)
@@ -401,87 +456,105 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
 
             {/* 消息列表 */}
             <div ref={listRef} className="overflow-y-auto flex-1 p-1.5 space-y-0.5 scrollbar-thin">
-              {filteredItems.length === 0 ? (
+              {searchQuery.trim() && loadingHistory && (
+                <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  <span>正在加载完整会话历史...</span>
+                </div>
+              )}
+              {historyLoadError && (
+                <div className="px-2 py-2 text-center text-xs text-destructive">
+                  {historyLoadError}
+                </div>
+              )}
+              {filteredItems.length === 0 && !loadingHistory ? (
                 <div className="py-6 text-center text-xs text-muted-foreground">
                   未找到匹配消息
                 </div>
               ) : (
-                filteredItems.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    data-minimap-visible={item.id === anchorId ? 'true' : undefined}
-                    className={cn(
-                      'flex items-start gap-2 w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent',
-                      visibleIds.has(item.id) && 'bg-accent/50'
-                    )}
-                    onClick={() => scrollToMessage(item.id)}
-                  >
-                    <ItemIcon item={item} />
-                    <div className="flex-1 min-w-0">
-                      <HighlightedPreview text={item.preview} query={searchQuery} />
-                    </div>
-                  </button>
-                ))
+                filteredItems.map((item) => {
+                  const displayText = getMessageNavigationDisplayText(item, searchQuery)
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      data-minimap-visible={item.id === anchorId ? 'true' : undefined}
+                      className={cn(
+                        'flex items-start gap-2 w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent',
+                        visibleIds.has(item.id) && 'bg-accent/50'
+                      )}
+                      onClick={() => scrollToMessage(item.id)}
+                    >
+                      <ItemIcon item={item} />
+                      <div className="flex-1 min-w-0">
+                        <HighlightedPreview text={displayText} query={searchQuery} />
+                      </div>
+                    </button>
+                  )
+                })
               )}
             </div>
           </div>
         )}
 
         {/* ── 迷你地图横杠 —— 只有这里触发面板展开 ── */}
-        <div
-          className="relative mt-3 flex-shrink-0 pointer-events-auto"
-          style={{ width: 24, height: barCount * MINIMAP_BAR_SPACING }}
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={handleMouseLeave}
-        >
-          {Array.from({ length: barCount }, (_, i) => {
-            const start = Math.floor((i * items.length) / barCount)
-            const end = Math.floor(((i + 1) * items.length) / barCount)
-            const group = items.slice(start, end)
-            const isVisible = group.some((it) => visibleIds.has(it.id))
-            const hasUser = group.some((it) => it.role === 'user')
-            const top = ((i + 0.5) / barCount) * 100
-            return (
-              <div
-                key={i}
-                className={cn(
-                  'absolute left-1 h-[2px] w-[20px] rounded-full transition-colors',
-                  isVisible
-                    ? 'bg-primary dark:bg-primary/70 minimap-visible-indicator'
-                    : hasUser
-                      ? 'bg-primary/25 dark:bg-primary/15'
-                      : 'bg-primary/40 dark:bg-primary/25'
-                )}
-                style={{ top: `${top}%` }}
-              />
-            )
-          })}
-        </div>
+        {showMinimapControls && (
+          <div
+            className="relative mt-3 flex-shrink-0 pointer-events-auto"
+            style={{ width: 24, height: barCount * MINIMAP_BAR_SPACING }}
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+          >
+            {Array.from({ length: barCount }, (_, i) => {
+              const start = Math.floor((i * items.length) / barCount)
+              const end = Math.floor(((i + 1) * items.length) / barCount)
+              const group = items.slice(start, end)
+              const isVisible = group.some((it) => visibleIds.has(it.id))
+              const hasUser = group.some((it) => it.role === 'user')
+              const top = ((i + 0.5) / barCount) * 100
+              return (
+                <div
+                  key={i}
+                  className={cn(
+                    'absolute left-1 h-[2px] w-[20px] rounded-full transition-colors',
+                    isVisible
+                      ? 'bg-primary dark:bg-primary/70 minimap-visible-indicator'
+                      : hasUser
+                        ? 'bg-primary/25 dark:bg-primary/15'
+                        : 'bg-primary/40 dark:bg-primary/25'
+                  )}
+                  style={{ top: `${top}%` }}
+                />
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* ── 滚动进度条 ── */}
-      <div className="relative ml-[4px] py-4 flex-shrink-0 pointer-events-auto" style={{ width: SCROLL_PROGRESS_WIDTH }}>
-        <div
-          ref={trackRef}
-          className="relative h-full rounded-full cursor-pointer scroll-progress-track"
-          onMouseDown={handleTrackMouseDown}
-        >
+      {canScroll && (
+        <div className="relative ml-[4px] py-4 flex-shrink-0 pointer-events-auto" style={{ width: SCROLL_PROGRESS_WIDTH }}>
           <div
-            className={cn(
-              'absolute left-0 right-0 rounded-full transition-colors duration-100 scroll-progress-thumb',
-              isDragging
-                ? 'scroll-progress-thumb-active cursor-grabbing'
-                : 'cursor-grab'
-            )}
-            style={{
-              height: `${thumbHeightPct}%`,
-              top: `${thumbTopPct}%`,
-            }}
-            onMouseDown={handleThumbMouseDown}
-          />
+            ref={trackRef}
+            className="relative h-full rounded-full cursor-pointer scroll-progress-track"
+            onMouseDown={handleTrackMouseDown}
+          >
+            <div
+              className={cn(
+                'absolute left-0 right-0 rounded-full transition-colors duration-100 scroll-progress-thumb',
+                isDragging
+                  ? 'scroll-progress-thumb-active cursor-grabbing'
+                  : 'cursor-grab'
+              )}
+              style={{
+                height: `${thumbHeightPct}%`,
+                top: `${thumbTopPct}%`,
+              }}
+              onMouseDown={handleThumbMouseDown}
+            />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -514,13 +587,14 @@ function HighlightedPreview({ text, query }: { text: string; query: string }): R
     return <span className="text-xs opacity-40">(空消息)</span>
   }
 
-  if (query.trim()) {
-    const escaped = escapeRegExp(query)
+  const normalizedQuery = query.trim()
+  if (normalizedQuery) {
+    const escaped = escapeRegExp(normalizedQuery)
     const parts = text.split(new RegExp(`(${escaped})`, 'gi'))
     return (
       <span className="text-xs text-popover-foreground/80 line-clamp-3">
         {parts.map((part, i) =>
-          part.toLowerCase() === query.toLowerCase()
+          part.toLowerCase() === normalizedQuery.toLowerCase()
             ? <mark key={i} className="bg-primary/20 text-primary rounded-sm px-0.5">{part}</mark>
             : part
         )}

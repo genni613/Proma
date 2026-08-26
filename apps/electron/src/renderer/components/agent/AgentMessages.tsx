@@ -23,13 +23,16 @@ import { ScrollMinimap } from '@/components/ai-elements/scroll-minimap'
 import type { MinimapItem } from '@/components/ai-elements/scroll-minimap'
 import { StickyUserMessage } from '@/components/ai-elements/sticky-user-message'
 import { useSmoothStream } from '@proma/ui'
+import { toTranscript } from '@proma/session-core'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { tabMinimapCacheAtom } from '@/atoms/tab-atoms'
+import type { TabMinimapItem } from '@/atoms/tab-atoms'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
+import { toMessageNavigationPreviewItems } from '@/lib/message-navigation-search'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, extractUserText, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, buildTaskProgressDataForTurn, type MessageGroup } from './SDKMessageRenderer'
@@ -675,28 +678,41 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
 
   // 迷你地图数据 — 直接使用统一的 allGroups（无需去重）
   const minimapItems: MinimapItem[] = React.useMemo(
-    () => visibleGroups.map((group) => ({
-      id: getGroupId(group),
-      role: group.type === 'user' ? 'user' as const
-        : group.type === 'system' ? 'status' as const
-        : 'assistant' as const,
-      preview: getGroupPreview(group),
-      avatar: group.type === 'user' ? userProfile.avatar : undefined,
-      model: group.type === 'assistant-turn' ? group.model : undefined,
-    })),
+    () => {
+      const turns = toTranscript(visibleGroups)
+      return visibleGroups.map((group, index) => {
+        const turn = turns[index]
+        return {
+          id: getGroupId(group),
+          role: group.type === 'user' ? 'user' as const
+            : group.type === 'system' ? 'status' as const
+            : 'assistant' as const,
+          preview: getGroupPreview(group),
+          searchText: turn ? [turn.text, ...turn.toolSummaries].filter(Boolean).join('\n') : '',
+          avatar: group.type === 'user' ? userProfile.avatar : undefined,
+          model: group.type === 'assistant-turn' ? group.model : undefined,
+        }
+      })
+    },
     [visibleGroups, userProfile.avatar]
+  )
+
+  // Tab 悬浮预览只缓存轻量摘要，避免把完整 Session 正文复制进全局缓存。
+  const tabMinimapItems = React.useMemo<TabMinimapItem[]>(
+    () => toMessageNavigationPreviewItems(minimapItems),
+    [minimapItems],
   )
 
   // 同步 minimap 缓存到 Tab 级别（供 Tab hover 预览使用）
   React.useEffect(() => {
-    if (minimapItems.length > 0) {
+    if (tabMinimapItems.length > 0) {
       setMinimapCache((prev) => {
         const next = new Map(prev)
-        next.set(sessionId, minimapItems)
+        next.set(sessionId, tabMinimapItems)
         return next
       })
     }
-  }, [sessionId, minimapItems, setMinimapCache])
+  }, [sessionId, tabMinimapItems, setMinimapCache])
 
   // 所有用户消息的数据 — 供 StickyUserMessage 使用
   const allUserMessagesData = React.useMemo(() => {
