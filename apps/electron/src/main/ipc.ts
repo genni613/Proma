@@ -6,11 +6,11 @@
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, clipboard, nativeImage } from 'electron'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
-import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare, TERMINAL_IPC_CHANNELS } from '@proma/shared'
+import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, WINDOWS_AGENT_ISLAND_IPC_CHANNELS, TRAY_IPC_CHANNELS } from '../types'
 import type {
   QuickTaskSubmitInput,
   VoiceDictationAudioChunkInput,
@@ -47,6 +47,8 @@ import type {
   FileOrFolderDialogResult,
   RecentMessagesResult,
   AgentSessionMeta,
+  AgentActiveSessionSnapshot,
+  SetAgentSessionActiveWorktreeInput,
   AgentSendInput,
   AgentThinkingLevel,
   AgentWorkspace,
@@ -58,9 +60,6 @@ import type {
   AgentAttachFileInput,
   WorkspaceAttachDirectoryInput,
   WorkspaceAttachFileInput,
-  GetTaskOutputInput,
-  GetTaskOutputResult,
-  StopTaskInput,
   WorkspaceMcpConfig,
   SkillMeta,
   BulkImportSkillItemResult,
@@ -132,7 +131,6 @@ import type {
   CreateTodoInput,
   StartTodoAgentInput,
   StartTodoAgentResult,
-  TodoAgentSessionActivation,
   UpdateTodoInput,
   CreateCalendarEventInput,
   UpdateCalendarEventInput,
@@ -149,11 +147,20 @@ import type {
   ResolvePlanningNativeSyncConflictInput,
   PlanningSyncProfile,
   SavePlanningSyncProfileInput,
+  BrowserViewState,
+  BrowserViewLayout,
+  BrowserNavigateInput,
+  BrowserTabInput,
+  BrowserCreateTabInput,
 } from '@proma/shared'
 import type { UserProfile, AppSettings } from '../types'
 import { getRuntimeStatus, getGitRepoStatus, reinitializeRuntime } from './lib/runtime-init'
+import { browserController } from './lib/browser-controller'
+import { acknowledgeTerminalOutput, closeTerminalsForSession, createTerminal, getTerminalSnapshot, killTerminal, resizeTerminal, writeTerminal } from './lib/terminal-service'
+import { getMainWindow } from './lib/main-window-store'
+import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import { getUnstagedChanges, invalidateGitDiffCache, getFileDiff, getUntrackedContent, revertFile, getDiffContents, listWorktrees, getWorktreeChanges, getMainRepoRoot } from './lib/git-diff-service'
-import { registerPromaFilePath } from './lib/local-file-protocol'
+import { registerPromaDirectoryPath, registerPromaFilePath } from './lib/local-file-protocol'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'
 import {
   listChannels,
@@ -197,7 +204,8 @@ import { extractTextFromAttachment } from './lib/document-parser'
 import { getTutorialContent, createWelcomeConversation } from './lib/tutorial-service'
 import { getUserProfile, updateUserProfile } from './lib/user-profile-service'
 import { getSettings, updateSettings } from './lib/settings-service'
-import { refreshAgentIslandConfiguration } from './lib/agent-island-service'
+import { refreshAgentIslandConfiguration, markAgentIslandSessionViewed } from './lib/agent-island-service'
+import { getAgentStatusHoverWindow } from './agent-status-hover-window'
 import { setBuiltinMcpUserEnabled } from './lib/builtin-mcp/settings'
 import { setDockBadgeCount } from './lib/dock-badge-service'
 
@@ -215,6 +223,8 @@ import {
   listAutomations,
   getAutomation,
   createAutomation,
+  getEffectiveAutomationScheduleFields,
+  validateExplicitAutomationScheduleFields,
   updateAutomation,
   deleteAutomation,
 } from './lib/automation-manager'
@@ -255,6 +265,9 @@ import {
 import { runPlanningNativeSync } from './lib/planning-native-sync-coordinator'
 import {
   listAgentSessions,
+  listActiveAgentSessions,
+  listArchivedAgentSessions,
+  countArchivedAgentSessions,
   createAgentSession,
   getAgentSessionMeta,
   getAgentSessionSDKMessages,
@@ -268,11 +281,11 @@ import {
   searchAgentSessionMessages,
   searchAgentSessionReferences,
 } from './lib/agent-session-manager'
-import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession } from './lib/agent-service'
+import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, isAgentSessionBusy, listActiveAgentSessionSnapshots, reserveAgentSessionStart, queueAgentMessage, submitOrEnqueueAgentMessage, enqueueAgentQueuedMessage, cancelAgentQueuedMessage, moveAgentQueuedMessage, clearAgentQueuedMessages, updateAgentPermissionMode, rewindAgentSession, setVisibleAgentSession } from './lib/agent-service'
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getScratchPadPath } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getScratchPadPath } from './lib/config-paths'
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
@@ -370,12 +383,10 @@ import { feishuBridgeManager } from './lib/feishu-bridge-manager'
 import { syncFeishuSyncSleepBlocker } from './lib/feishu-sleep-blocker'
 import { presenceService } from './lib/feishu-presence'
 import { getDingTalkConfig, saveDingTalkConfig, getDecryptedClientSecret, getDingTalkMultiBotConfig, saveDingTalkBotConfig, removeDingTalkBot, getDecryptedBotClientSecret } from './lib/dingtalk-config'
+import { listShallowDirectory } from './lib/directory-listing'
 import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
 import { getWeChatConfig } from './lib/wechat-config'
 import { wechatBridge } from './lib/wechat-bridge'
-
-/** 文件浏览器中需要隐藏的系统文件 */
-const HIDDEN_FS_ENTRIES = new Set(['.DS_Store', 'Thumbs.db'])
 
 /** 已知编辑器应用名称白名单（macOS） */
 const KNOWN_EDITORS = [
@@ -410,6 +421,9 @@ function getAuthorizedRoots(options?: FileAccessOptions): string[] {
     const meta = getAgentSessionMeta(options.sessionId)
     if (meta?.attachedDirectories) {
       roots.push(...meta.attachedDirectories)
+    }
+    if (meta?.activeWorktree?.path) {
+      roots.push(meta.activeWorktree.path)
     }
     if (meta?.attachedFiles) {
       roots.push(...meta.attachedFiles)
@@ -461,6 +475,8 @@ function normalizeFileAccessOptions(value?: FileAccessOptions | string[]): FileA
   return {
     sessionId: typeof value.sessionId === 'string' ? value.sessionId : undefined,
     workspaceSlug: typeof value.workspaceSlug === 'string' ? value.workspaceSlug : undefined,
+    workspaceSkillSlug: typeof value.workspaceSkillSlug === 'string' ? value.workspaceSkillSlug : undefined,
+    legacySkillFilePath: typeof value.legacySkillFilePath === 'string' ? value.legacySkillFilePath : undefined,
     candidateBasePaths: Array.isArray(value.candidateBasePaths)
       ? value.candidateBasePaths.filter((p): p is string => typeof p === 'string' && p.length > 0)
       : undefined,
@@ -483,14 +499,45 @@ function getWorkspaceSlugsForAccess(options?: FileAccessOptions): string[] {
   return Array.from(workspaceSlugs)
 }
 
+function getManagedSkillBasePath(options?: FileAccessOptions): string | undefined {
+  const workspaceSlug = options?.workspaceSkillSlug
+  if (!workspaceSlug || !getWorkspaceSlugsForAccess(options).includes(workspaceSlug)) return undefined
+  const workspace = listAgentWorkspaces().find((item) => item.slug === workspaceSlug)
+  return workspace ? getWorkspaceSkillsDir(workspace.slug) : undefined
+}
+
 function getAllowedCandidateBasePaths(options?: FileAccessOptions): string[] | undefined {
-  const allowed = options?.candidateBasePaths?.filter((p) => isPathAllowed(p, options)) ?? []
+  const allowed = (getPreviewCandidateBasePaths(options) ?? []).filter((p) => isPathAllowed(p, options))
   return allowed.length > 0 ? allowed : undefined
+}
+
+function getLegacySkillBasePath(options?: FileAccessOptions): string | undefined {
+  const legacyFilePath = options?.legacySkillFilePath
+  if (!legacyFilePath) return undefined
+  const normalized = legacyFilePath.replace(/\\/g, '/')
+  return normalized.match(/^(.*\/skills)\/[^/]+\/SKILL\.md$/i)?.[1]
 }
 
 function getPreviewCandidateBasePaths(options?: FileAccessOptions): string[] | undefined {
   const bases = options?.candidateBasePaths?.filter((p) => typeof p === 'string' && p.length > 0) ?? []
+  const managedSkillBasePath = getManagedSkillBasePath(options)
+  if (managedSkillBasePath && !bases.includes(managedSkillBasePath)) {
+    bases.unshift(managedSkillBasePath)
+  }
+  const legacySkillBasePath = getLegacySkillBasePath(options)
+  if (legacySkillBasePath && !bases.includes(legacySkillBasePath)) {
+    bases.push(legacySkillBasePath)
+  }
   return bases.length > 0 ? bases : undefined
+}
+
+/** Resolve preview-only relative paths before handing them to OS-level file actions. */
+async function resolveFileAccessPath(filePath: string, options?: FileAccessOptions): Promise<string> {
+  const [{ resolve }, { resolveFilePath }] = await Promise.all([
+    import('node:path'),
+    import('./lib/file-preview-service'),
+  ])
+  return resolveFilePath(filePath, getPreviewCandidateBasePaths(options)) ?? resolve(filePath)
 }
 
 async function getAccessRootMainRepo(root: string): Promise<string | null> {
@@ -832,10 +879,9 @@ async function getWindowsDefaultAppInfo(filePath: string): Promise<{ appPath: st
 
 async function getDefaultAppInfoForFile(
   filePath: string,
-  _options?: FileAccessOptions,
+  options?: FileAccessOptions,
 ): Promise<import('@proma/shared').DefaultAppInfo | null> {
-  const { resolve } = await import('node:path')
-  const absPath = resolve(filePath)
+  const absPath = await resolveFileAccessPath(filePath, options)
 
   const cacheKey = `${process.platform}:${extOf(filePath) || filePath}`
   const cachedInfo = defaultAppCache.get(cacheKey) ?? getCachedDefaultAppInfo(cacheKey)
@@ -943,12 +989,20 @@ export function resolveAppIconPath(variantId: string): string | null {
 function releaseDirectoryWatcherIfUnreferenced(dirPath: string): void {
   const isStillReferenced = listAgentWorkspaces().some((workspace) =>
     workspace.projectRootPath === dirPath
-    || getWorkspaceAttachedDirectories(workspace.slug).includes(dirPath),
+    || getWorkspaceAttachedDirectories(workspace.slug).includes(dirPath)
+    || getWorkspaceAttachedFiles(workspace.slug).some((filePath) => dirname(filePath) === dirPath),
   ) || listAgentSessions().some((session) =>
-    session.attachedDirectories?.includes(dirPath),
+    session.attachedDirectories?.includes(dirPath)
+    || session.attachedFiles?.some((filePath) => dirname(filePath) === dirPath),
   )
 
   if (!isStillReferenced) unwatchAttachedDirectory(dirPath)
+}
+
+function releaseAttachedFileWatchers(filePaths: readonly string[] | undefined): void {
+  for (const dirPath of new Set((filePaths ?? []).map((filePath) => dirname(filePath)))) {
+    releaseDirectoryWatcherIfUnreferenced(dirPath)
+  }
 }
 
 async function withOAuthDeviceCodeQr<T extends CodexOAuthDeviceCode | XaiOAuthDeviceCode>(deviceCode: T): Promise<T> {
@@ -962,6 +1016,41 @@ async function withOAuthDeviceCodeQr<T extends CodexOAuthDeviceCode | XaiOAuthDe
 }
 
 export function registerIpcHandlers(): void {
+  // ===== 本地终端（仅主 renderer 可操作，不能指定可执行文件） =====
+  const assertMainTerminalRenderer = (senderId: number): void => {
+    const mainWindow = getMainWindow()
+    if (!mainWindow || mainWindow.webContents.id !== senderId) {
+      throw new Error('仅主窗口可以操作本地终端。')
+    }
+  }
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.CREATE, async (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    if (!input.sessionId || !getAgentSessionMeta(input.sessionId)) {
+      throw new Error('终端所属 Agent 会话不存在。')
+    }
+    return createTerminal(input)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.INPUT, async (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return writeTerminal(input)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.RESIZE, async (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return resizeTerminal(input)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.KILL, async (event, terminalId: string) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return killTerminal(terminalId)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.SNAPSHOT, async (event, terminalId: string) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return getTerminalSnapshot(terminalId)
+  })
+  ipcMain.on(TERMINAL_IPC_CHANNELS.ACK_OUTPUT, (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    acknowledgeTerminalOutput(input)
+  })
+
   console.log('[IPC] 正在注册 IPC 处理器...')
 
   // ===== 运行时相关 =====
@@ -1176,9 +1265,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.SYSTEM_OPEN_FILE,
     async (_, filePath: string, appName?: string, access?: FileAccessOptions | string[]): Promise<void> => {
-      const { resolve } = await import('node:path')
-      const absPath = resolve(filePath)
       const options = normalizeFileAccessOptions(access)
+      const absPath = await resolveFileAccessPath(filePath, options)
       if (!isPathAllowed(absPath, options)) {
         console.warn('[IPC] shell:system-open-file 拒绝越界路径:', absPath)
         return
@@ -1229,12 +1317,13 @@ export function registerIpcHandlers(): void {
       if (!filePath || typeof filePath !== 'string') return null
       try {
         const options = normalizeFileAccessOptions(access)
-        if (options && !isPathAllowed(filePath, options)) {
-          console.warn('[IPC] shell:get-default-app-for-file 拒绝越界路径:', filePath)
+        const resolvedPath = await resolveFileAccessPath(filePath, options)
+        if (options && !isPathAllowed(resolvedPath, options)) {
+          console.warn('[IPC] shell:get-default-app-for-file 拒绝越界路径:', resolvedPath)
           return null
         }
-        console.log('[IPC] get-default-app-for-file 收到请求:', filePath)
-        const result = await getDefaultAppInfoForFile(filePath, options)
+        console.log('[IPC] get-default-app-for-file 收到请求:', resolvedPath)
+        const result = await getDefaultAppInfoForFile(resolvedPath, options)
         console.log('[IPC] get-default-app-for-file 返回:', result ? `name=${result.name} appPath=${result.appPath} iconLen=${result.iconDataUrl?.length}` : 'null')
         return result
       } catch (err) {
@@ -2004,6 +2093,30 @@ export function registerIpcHandlers(): void {
     async (): Promise<AgentSessionMeta[]> => listAgentSessions()
   )
 
+  // 获取未归档会话列表（侧栏 active 视图）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.LIST_ACTIVE_SESSIONS,
+    async (): Promise<AgentSessionMeta[]> => listActiveAgentSessions(),
+  )
+
+  // 获取当前主进程仍在执行的 Agent 会话快照，供 renderer 重载后恢复运行态
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.ACTIVE_SESSIONS_SNAPSHOT,
+    async (): Promise<AgentActiveSessionSnapshot[]> => listActiveAgentSessionSnapshots(),
+  )
+
+  // 获取归档会话列表（进入归档视图时按需加载）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.LIST_ARCHIVED_SESSIONS,
+    async (): Promise<AgentSessionMeta[]> => listArchivedAgentSessions(),
+  )
+
+  // 获取归档会话数量（active 视图只展示计数）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.COUNT_ARCHIVED_SESSIONS,
+    async (): Promise<number> => countArchivedAgentSessions(),
+  )
+
   // 创建 Agent 会话
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_SESSION,
@@ -2015,6 +2128,97 @@ export function registerIpcHandlers(): void {
       return session
     }
   )
+
+  // 受管浏览器：renderer 只能投影状态和更新 slot 布局，不能取得 WebContents/CDP。
+  const assertMainRenderer = async (senderId: number): Promise<void> => {
+    const { getMainWindow } = await import('./index')
+    const mainWindow = getMainWindow()
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.id !== senderId) {
+      throw new Error('仅主窗口可以操作受管浏览器。')
+    }
+  }
+  const assertBrowserSessionAccess = async (senderId: number, sessionId: string): Promise<void> => {
+    await assertMainRenderer(senderId)
+    const session = getAgentSessionMeta(sessionId)
+    if (!session) throw new Error('Agent 会话不存在。')
+    // 自动任务与协作子会话同样可以使用受管浏览器；仅校验会话仍存在。
+    browserController.configureSession(sessionId, {
+      profileKey: resolveBrowserProfileKey(session.workspaceId, sessionId),
+      executionSource: session.sourceDelegationId ? 'delegation' : session.sourceAutomationId ? 'automation' : 'user',
+    })
+  }
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.OPEN_BROWSER,
+    async (event, sessionId: string): Promise<BrowserViewState> => {
+      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      return browserController.open(sessionId)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_BROWSER_STATE,
+    async (event, sessionId: string): Promise<BrowserViewState | null> => {
+      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      return browserController.getState(sessionId)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_BROWSER_LAYOUT,
+    async (event, layout: BrowserViewLayout): Promise<void> => {
+      if (!layout || typeof layout.sessionId !== 'string' || !layout.bounds || !Number.isSafeInteger(layout.revision)) throw new Error('无效的浏览器布局。')
+      await assertBrowserSessionAccess(event.sender.id, layout.sessionId)
+      browserController.setLayout(layout)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.MINIMIZE_BROWSER,
+    async (event, sessionId: string): Promise<void> => {
+      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      browserController.minimize(sessionId)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.NAVIGATE_BROWSER,
+    async (event, input: BrowserNavigateInput): Promise<BrowserViewState> => {
+      await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+      return browserController.navigateDisplay(input.sessionId, input.url, input.tabId)
+    },
+  )
+  ipcMain.handle(AGENT_IPC_CHANNELS.GO_BACK_BROWSER, async (event, sessionId: string) => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.goBackDisplay(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.GO_FORWARD_BROWSER, async (event, sessionId: string) => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.goForwardDisplay(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.RELOAD_BROWSER, async (event, sessionId: string) => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.reloadDisplay(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.CLOSE_BROWSER, async (event, sessionId: string): Promise<void> => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    await browserController.close(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, async (event, sessionId: string): Promise<BrowserViewState> => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.listTabs(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.CREATE_BROWSER_TAB, async (event, input: BrowserCreateTabInput): Promise<BrowserViewState> => {
+    await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+    return browserController.createDisplayTab(input.sessionId, input.url)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.SELECT_BROWSER_TAB, async (event, input: BrowserTabInput): Promise<BrowserViewState> => {
+    await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+    if (!input.tabId) throw new Error('tabId 必填。')
+    return browserController.selectTab(input.sessionId, input.tabId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.CLOSE_BROWSER_TAB, async (event, input: BrowserTabInput): Promise<BrowserViewState | null> => {
+    await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+    if (!input.tabId) throw new Error('tabId 必填。')
+    return browserController.closeTab(input.sessionId, input.tabId)
+  })
+
 
   // 获取 Agent 会话 SDKMessage（Phase 4 新格式）
   ipcMain.handle(
@@ -2041,6 +2245,43 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 选择或清除 Agent 会话的活动 worktree
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_ACTIVE_WORKTREE,
+    async (_, input: SetAgentSessionActiveWorktreeInput): Promise<AgentSessionMeta> => {
+      if (!input || typeof input.sessionId !== 'string' || (input.worktreePath !== null && typeof input.worktreePath !== 'string')) {
+        throw new Error('活动 worktree 参数无效')
+      }
+      const session = getAgentSessionMeta(input.sessionId)
+      if (!session) throw new Error(`Agent 会话不存在: ${input.sessionId}`)
+      if (input.worktreePath === null) {
+        return updateAgentSessionMeta(input.sessionId, { activeWorktree: undefined })
+      }
+
+      const access = normalizeFileAccessOptions({ sessionId: input.sessionId })
+      if (!(await ensurePathAllowedWithWorktree(input.worktreePath, access))) {
+        throw new Error('无权将该目录设为活动 worktree')
+      }
+
+      const requestedPath = normalizePathForCompare(realpathOrResolve(input.worktreePath))
+      const selected = (await listWorktrees(input.worktreePath)).find((worktree) =>
+        !worktree.isMain && normalizePathForCompare(realpathOrResolve(worktree.path)) === requestedPath,
+      )
+      if (!selected) throw new Error('指定目录不是可用的 linked worktree')
+
+      const mainRepoRoot = await getMainRepoRoot(selected.path)
+      if (!mainRepoRoot) throw new Error('无法确认 worktree 的主仓库')
+      return updateAgentSessionMeta(input.sessionId, {
+        activeWorktree: {
+          path: realpathOrResolve(selected.path),
+          mainRepoRoot: realpathOrResolve(mainRepoRoot),
+          branch: selected.branch,
+          selectedAt: Date.now(),
+        },
+      })
+    },
+  )
+
   // 生成 Agent 会话标题
   ipcMain.handle(
     AGENT_IPC_CHANNELS.GENERATE_TITLE,
@@ -2053,6 +2294,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.DELETE_SESSION,
     async (_, id: string): Promise<void> => {
+      const attachedFiles = getAgentSessionMeta(id)?.attachedFiles
       // 清理权限服务中该会话的白名单
       permissionService.clearSessionWhitelist(id)
       permissionService.clearSessionPending(id)
@@ -2060,7 +2302,11 @@ export function registerIpcHandlers(): void {
       askUserService.clearSessionPending(id)
       // 清理 ExitPlanMode 服务中的待处理请求
       exitPlanService.clearSessionPending(id)
-      return deleteAgentSession(id)
+      clearAgentQueuedMessages(id)
+      await browserController.close(id)
+      closeTerminalsForSession(id)
+      deleteAgentSession(id)
+      releaseAttachedFileWatchers(attachedFiles)
     }
   )
 
@@ -2152,15 +2398,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.MOVE_SESSION_TO_WORKSPACE,
     async (_, input: MoveSessionToWorkspaceInput): Promise<AgentSessionMeta> => {
-      // 渲染进程的 running 状态可能比主进程 activeSessions 清理更早变为 false
-      // （STREAM_COMPLETE 在 finally 之前发送），短暂等待后重试一次
-      if (isAgentSessionActive(input.sessionId)) {
-        await new Promise((r) => setTimeout(r, 500))
-        if (isAgentSessionActive(input.sessionId)) {
-          throw new Error('会话正在运行中，请停止后再迁移')
-        }
+      if (isAgentSessionBusy(input.sessionId)) {
+        throw new Error('会话正在启动、运行或仍有排队消息，请停止或清空队列后再迁移')
       }
-      return moveSessionToWorkspace(input.sessionId, input.targetWorkspaceId)
+      const moved = moveSessionToWorkspace(input.sessionId, input.targetWorkspaceId)
+      feishuBridgeManager.syncWorkspaceForSession(moved.id, moved.workspaceId!)
+      return moved
     }
   )
 
@@ -2201,6 +2444,9 @@ export function registerIpcHandlers(): void {
       const workspaces = listAgentWorkspaces()
       for (const workspace of workspaces) {
         if (workspace.projectRootPath) watchAttachedDirectory(workspace.projectRootPath)
+        for (const filePath of getWorkspaceAttachedFiles(workspace.slug)) {
+          watchAttachedDirectory(dirname(filePath))
+        }
       }
       return workspaces
     }
@@ -2290,9 +2536,13 @@ export function registerIpcHandlers(): void {
         throw new Error('至少需要保留一个项目')
       }
 
-      const affectedSessionIds = listAgentSessions()
+      const affectedSessions = listAgentSessions()
         .filter((session) => session.workspaceId === id)
-        .map((session) => session.id)
+      const affectedSessionIds = affectedSessions.map((session) => session.id)
+      const deletedAttachedFiles = [
+        ...affectedSessions.flatMap((session) => session.attachedFiles ?? []),
+        ...getWorkspaceAttachedFiles(deletingWorkspace.slug),
+      ]
       const affectedAutomationIds = listAutomations()
         .filter((automation) => automation.workspaceId === id)
         .map((automation) => automation.id)
@@ -2315,6 +2565,7 @@ export function registerIpcHandlers(): void {
         if (isAgentSessionActive(sessionId)) {
           stopAgent(sessionId)
         }
+        closeTerminalsForSession(sessionId)
         deleteAgentSession(sessionId)
       }
       for (const automationId of affectedAutomationIds) {
@@ -2325,6 +2576,7 @@ export function registerIpcHandlers(): void {
       }
       deleteAgentWorkspace(id)
 
+      releaseAttachedFileWatchers(deletedAttachedFiles)
       if (deletedProjectRoot) releaseDirectoryWatcherIfUnreferenced(deletedProjectRoot)
     }
   )
@@ -2533,8 +2785,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.WRITE_WORKSPACE_AGENTS_MD,
-    async (_, workspaceSlug: string, content: string): Promise<void> => {
-      writeWorkspaceAgentsMd(workspaceSlug, content)
+    async (_, workspaceSlug: string, content: string, expectedContent?: string): Promise<void> => {
+      writeWorkspaceAgentsMd(workspaceSlug, content, expectedContent)
     }
   )
 
@@ -2554,8 +2806,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.WRITE_WORKSPACE_AUTO_MEMORY_FILE,
-    async (_, workspaceSlug: string, relativePath: string, content: string): Promise<void> => {
-      writeWorkspaceAutoMemoryFile(workspaceSlug, relativePath, content)
+    async (_, workspaceSlug: string, relativePath: string, content: string, expectedContent?: string): Promise<void> => {
+      writeWorkspaceAutoMemoryFile(workspaceSlug, relativePath, content, expectedContent)
     }
   )
 
@@ -2633,14 +2885,30 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SEND_MESSAGE,
     async (event, input: AgentSendInput): Promise<void> => {
-      const session = getAgentSessionMeta(input.sessionId)
-      if (session) {
-        await feishuBridgeManager.startSessionMirrorRun(session).catch((error) => {
-          console.error('[飞书 Session 镜像] 流式卡片初始化失败:', error)
-        })
+      const releaseStart = reserveAgentSessionStart(input.sessionId)
+      try {
+        const session = getAgentSessionMeta(input.sessionId)
+        if (session) {
+          await feishuBridgeManager.startSessionMirrorRun(session).catch((error) => {
+            console.error('[飞书 Session 镜像] 流式卡片初始化失败:', error)
+          })
+        }
+        await runAgent(input, event.sender)
+      } finally {
+        releaseStart()
       }
-      await runAgent(input, event.sender)
     }
+  )
+
+  // renderer 的当前 Agent Tab 决定 partial 消息是前台 20fps 还是后台 4fps。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_VISIBLE_STREAM_SESSION,
+    async (event, sessionId: string | null): Promise<void> => {
+      if (sessionId !== null && (typeof sessionId !== 'string' || sessionId.length === 0)) {
+        throw new Error('可见 Agent 会话 ID 非法')
+      }
+      setVisibleAgentSession(event.sender, sessionId)
+    },
   )
 
   // 中止 Agent 执行
@@ -2662,24 +2930,34 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // ===== Agent 后台任务管理 =====
-
-  // 获取任务输出（保留接口，供未来扩展）
+  // 主进程原子决定立即注入活跃 Agent 或进入 deferred queue。
   ipcMain.handle(
-    AGENT_IPC_CHANNELS.GET_TASK_OUTPUT,
-    async (_, input: GetTaskOutputInput): Promise<GetTaskOutputResult> => {
-      try {
-        // TODO: 实现通过 SDK 的 TaskOutput 获取任务输出
-        console.warn('[IPC] GET_TASK_OUTPUT: 当前版本暂未实现，返回空输出')
-        return {
-          output: '',
-          isComplete: false,
-        }
-      } catch (error) {
-        console.error('[IPC] 获取任务输出失败:', error)
-        throw error
-      }
-    }
+    AGENT_IPC_CHANNELS.SUBMIT_OR_ENQUEUE_MESSAGE,
+    async (event, input: import('@proma/shared').AgentSubmitOrEnqueueInput): Promise<import('@proma/shared').AgentSubmitOrEnqueueResult> => {
+      return submitOrEnqueueAgentMessage(input, event.sender)
+    },
+  )
+
+  // 兼容旧调用：将消息交给主进程 deferred queue。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.ENQUEUE_QUEUED_MESSAGE,
+    async (event, input: import('@proma/shared').AgentDeferredQueueMessageInput): Promise<void> => {
+      enqueueAgentQueuedMessage(input, event.sender)
+    },
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.CANCEL_QUEUED_MESSAGE,
+    async (_, input: import('@proma/shared').AgentQueuedMessageControlInput): Promise<boolean> => {
+      return cancelAgentQueuedMessage(input)
+    },
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.MOVE_QUEUED_MESSAGE,
+    async (_, input: import('@proma/shared').AgentMoveQueuedMessageInput): Promise<boolean> => {
+      return moveAgentQueuedMessage(input)
+    },
   )
 
   // ===== Agent 权限系统 =====
@@ -2697,23 +2975,6 @@ export function registerIpcHandlers(): void {
           sessionId,
           payload: { kind: 'proma_event', event: { type: 'permission_resolved', requestId, behavior } },
         })
-      }
-    }
-  )
-
-  // 停止任务
-  ipcMain.handle(
-    AGENT_IPC_CHANNELS.STOP_TASK,
-    async (_, input: StopTaskInput): Promise<void> => {
-      try {
-        if (input.type === 'shell') {
-          console.warn('[IPC] STOP_TASK: Shell 任务停止功能待实现')
-        } else {
-          console.warn('[IPC] STOP_TASK: Agent 任务暂不支持单独停止')
-        }
-      } catch (error) {
-        console.error('[IPC] 停止任务失败:', error)
-        throw error
       }
     }
   )
@@ -3082,6 +3343,7 @@ export function registerIpcHandlers(): void {
 
       const updated = [...existing, safePath]
       updateAgentSessionMeta(input.sessionId, { attachedFiles: updated })
+      watchAttachedDirectory(dirname(safePath))
       return updated
     }
   )
@@ -3096,6 +3358,7 @@ export function registerIpcHandlers(): void {
       const existing = meta.attachedFiles ?? []
       const updated = existing.filter((f) => f !== input.filePath)
       updateAgentSessionMeta(input.sessionId, { attachedFiles: updated })
+      releaseDirectoryWatcherIfUnreferenced(dirname(input.filePath))
       return updated
     }
   )
@@ -3130,7 +3393,9 @@ export function registerIpcHandlers(): void {
       const stats = statSync(safePath)
       if (!stats.isFile()) throw new Error('只能附加文件')
 
-      return attachWorkspaceFile(input.workspaceSlug, safePath)
+      const updated = attachWorkspaceFile(input.workspaceSlug, safePath)
+      watchAttachedDirectory(dirname(safePath))
+      return updated
     }
   )
 
@@ -3138,7 +3403,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.DETACH_WORKSPACE_FILE,
     async (_, input: WorkspaceAttachFileInput): Promise<string[]> => {
-      return detachWorkspaceFile(input.workspaceSlug, input.filePath)
+      const updated = detachWorkspaceFile(input.workspaceSlug, input.filePath)
+      releaseDirectoryWatcherIfUnreferenced(dirname(input.filePath))
+      return updated
     }
   )
 
@@ -3197,44 +3464,16 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_DIRECTORY,
     async (_, dirPath: string, access?: FileAccessOptions): Promise<FileEntry[]> => {
-      const { existsSync, readdirSync, statSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
-
       const safePath = resolve(dirPath)
-      // 目录可能已被删除（如删除 Agent 会话后面板仍持有旧路径），优雅返回空列表
-      if (!existsSync(safePath)) {
-        return []
-      }
+      // 目录可能已被删除（如删除 Agent 会话后面板仍持有旧路径），优雅返回空列表。
+      if (!existsSync(safePath)) return []
       if (!isPathAllowed(safePath, normalizeFileAccessOptions(access))) {
+        // 路径可能刚好在 existsSync 与 realpath 校验之间被删除。
+        if (!existsSync(safePath)) return []
         throw new Error('访问路径超出当前会话的授权范围')
       }
 
-      const entries: FileEntry[] = []
-      const items = readdirSync(safePath, { withFileTypes: true })
-
-      for (const item of items) {
-        if (HIDDEN_FS_ENTRIES.has(item.name)) continue
-        const fullPath = resolve(safePath, item.name)
-        const isDirectory = item.isDirectory()
-        const size = isDirectory ? undefined : statSync(fullPath).size
-        entries.push({
-          name: item.name,
-          path: fullPath,
-          isDirectory,
-          size,
-        })
-      }
-
-      // 目录在前，文件在后；隐藏文件（.开头）排在同类末尾，各自按名称排序
-      entries.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        const aHidden = a.name.startsWith('.')
-        const bHidden = b.name.startsWith('.')
-        if (aHidden !== bHidden) return aHidden ? 1 : -1
-        return a.name.localeCompare(b.name)
-      })
-
-      return entries
+      return listShallowDirectory(safePath)
     }
   )
 
@@ -3371,7 +3610,7 @@ export function registerIpcHandlers(): void {
   // 解析文件路径并读取内容（供内联预览使用）
   ipcMain.handle(
     'file:resolve-and-read',
-    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<{ resolvedPath: string; content: string } | null> => {
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<import('@proma/shared').FilePreviewReadResult | null> => {
       const { resolveAndReadFile, resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       const resolved = resolveFilePath(filePath, getPreviewCandidateBasePaths(options))
@@ -3402,7 +3641,7 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 仅解析文件路径（供 PDF/图片等用 file:// 加载）
+  // 仅解析文件路径（供 PDF/图片等用 proma-file:// 加载）
   ipcMain.handle(
     'file:resolve-path',
     async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<ResolvedFileUrl | null> => {
@@ -3416,6 +3655,25 @@ export function registerIpcHandlers(): void {
         return { url: registerPromaFilePath(result) }
       } catch (err) {
         console.warn('[IPC] file:resolve-path 无法注册为文件，跳过:', result, err instanceof Error ? err.message : err)
+        return null
+      }
+    }
+  )
+
+  // 为 HTML 预览注册所在目录，使相对 CSS、脚本和图片资源保持可加载。
+  // 返回的仍是 token-gated proma-file URL，不向渲染进程泄露本机绝对路径。
+  ipcMain.handle(
+    'file:resolve-html-preview-path',
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<ResolvedFileUrl | null> => {
+      const { resolveFilePath } = await import('./lib/file-preview-service')
+      const options = normalizeFileAccessOptions(access)
+      const result = resolveFilePath(filePath, getPreviewCandidateBasePaths(options))
+      if (!result) return null
+      try {
+        const directoryUrl = registerPromaDirectoryPath(dirname(result))
+        return { url: `${directoryUrl}/${encodeURIComponent(basename(result))}` }
+      } catch (err) {
+        console.warn('[IPC] file:resolve-html-preview-path 无法注册预览目录，跳过:', result, err instanceof Error ? err.message : err)
         return null
       }
     }
@@ -3472,10 +3730,18 @@ export function registerIpcHandlers(): void {
       const { readFileSync, statSync } = await import('node:fs')
       const { resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
-      const resolved = resolveFilePath(filePath, getPreviewCandidateBasePaths(options))
-      if (!resolved) return null
+      // 该接口会把原始文件内容送回 renderer，只允许读取已授权路径；不能接受
+      // 预览场景使用的 unrestricted 标志，避免 renderer 借此读取任意本地文件。
+      const restrictedOptions = options?.unrestricted ? { ...options, unrestricted: false } : options
+      const allowedBasePaths = getAllowedCandidateBasePaths(restrictedOptions)
+      const resolved = resolveFilePath(filePath, allowedBasePaths)
+      if (!resolved || !isPathAllowed(resolved, restrictedOptions)) return null
+      const requestedMaxSize = typeof maxSize === 'number' && Number.isFinite(maxSize) && maxSize > 0
+        ? maxSize
+        : MAX_ATTACHMENT_SIZE
+      const effectiveMaxSize = Math.min(requestedMaxSize, MAX_ATTACHMENT_SIZE)
       const st = statSync(resolved)
-      if (maxSize && st.size > maxSize) return null
+      if (st.size > effectiveMaxSize) return null
       return readFileSync(resolved).toString('base64')
     }
   )
@@ -3524,40 +3790,15 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_ATTACHED_DIRECTORY,
     async (_, dirPath: string, access?: FileAccessOptions | string[]): Promise<FileEntry[]> => {
-      const { readdirSync, statSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
-
       const safePath = resolve(dirPath)
       const options = normalizeFileAccessOptions(access)
       if (!isPathAllowed(safePath, options)) {
+        // 已解绑或被删除的附加目录不应让文件面板持续报错。
+        if (!existsSync(safePath)) return []
         throw new Error('访问路径不在允许范围内')
       }
-      const entries: FileEntry[] = []
-      const items = readdirSync(safePath, { withFileTypes: true })
 
-      for (const item of items) {
-        if (HIDDEN_FS_ENTRIES.has(item.name)) continue
-        const fullPath = resolve(safePath, item.name)
-        const isDirectory = item.isDirectory()
-        const size = isDirectory ? undefined : statSync(fullPath).size
-        entries.push({
-          name: item.name,
-          path: fullPath,
-          isDirectory,
-          size,
-        })
-      }
-
-      // 目录在前，文件在后；隐藏文件（.开头）排在同类末尾
-      entries.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        const aHidden = a.name.startsWith('.')
-        const bHidden = b.name.startsWith('.')
-        if (aHidden !== bHidden) return aHidden ? 1 : -1
-        return a.name.localeCompare(b.name)
-      })
-
-      return entries
+      return listShallowDirectory(safePath)
     }
   )
 
@@ -3702,6 +3943,20 @@ export function registerIpcHandlers(): void {
   )
 
   // 搜索工作区文件（用于 @ 引用，递归扫描，支持附加目录）
+  type WorkspaceFileSearchEntry = {
+    name: string
+    path: string
+    type: 'file' | 'dir'
+    source: 'session' | 'workspace'
+  }
+  const workspaceFileSearchIndexCache = new Map<string, {
+    expiresAt: number
+    rootEntries: WorkspaceFileSearchEntry[]
+    workspaceEntries: WorkspaceFileSearchEntry[]
+  }>()
+  const WORKSPACE_FILE_INDEX_CACHE_TTL_MS = 3_000
+  const WORKSPACE_FILE_INDEX_CACHE_MAX_ENTRIES = 20
+
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SEARCH_WORKSPACE_FILES,
     async (_, rootPath: string, query: string, limit = 20, additionalPaths?: string[], sessionPaths?: string[]): Promise<FileSearchResult> => {
@@ -3709,15 +3964,18 @@ export function registerIpcHandlers(): void {
       const { resolve, relative, basename } = await import('node:path')
 
       const safeRoot = resolve(rootPath)
+      const resolvedAdditionalPaths = (additionalPaths ?? []).map((entry) => resolve(entry))
+      const resolvedSessionPaths = (sessionPaths ?? []).map((entry) => resolve(entry))
       const ignoreDirs = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', '.venv', 'build', '.cache'])
       const ignoreFiles = new Set(['.DS_Store', '.Spotlight-V100', '.Trashes', 'Thumbs.db', 'desktop.ini'])
       const BROWSE_LIMIT_PER_GROUP = 2000
       const BROWSE_TOTAL_CAP = 3000
+      const INDEX_ENTRY_CAP_PER_GROUP = 10_000
 
       // 按来源分组收集文件
-      type Entry = { name: string; path: string; type: 'file' | 'dir'; source: 'session' | 'workspace' }
-      const rootEntries: Entry[] = []
-      const workspaceEntries: Entry[] = []
+      type Entry = WorkspaceFileSearchEntry
+      let rootEntries: Entry[] = []
+      let workspaceEntries: Entry[] = []
 
       function scan(
         dir: string,
@@ -3727,10 +3985,11 @@ export function registerIpcHandlers(): void {
         useAbsPath: boolean,
         source: 'session' | 'workspace',
       ): void {
-        if (depth > 10) return
+        if (depth > 10 || target.length >= INDEX_ENTRY_CAP_PER_GROUP) return
         try {
           const items = readdirSync(dir, { withFileTypes: true })
           for (const item of items) {
+            if (target.length >= INDEX_ENTRY_CAP_PER_GROUP) break
             if (ignoreFiles.has(item.name)) continue
             if (item.isDirectory() && ignoreDirs.has(item.name)) continue
 
@@ -3753,6 +4012,7 @@ export function registerIpcHandlers(): void {
       }
 
       function addAttachedPath(pathValue: string, target: Entry[], source: 'session' | 'workspace'): void {
+        if (target.length >= INDEX_ENTRY_CAP_PER_GROUP) return
         try {
           const attachedPath = resolve(pathValue)
           const name = basename(attachedPath)
@@ -3760,6 +4020,7 @@ export function registerIpcHandlers(): void {
 
           const stats = statSync(attachedPath)
           if (stats.isFile()) {
+            if (target.length >= INDEX_ENTRY_CAP_PER_GROUP) return
             target.push({
               name,
               path: attachedPath,
@@ -3772,6 +4033,7 @@ export function registerIpcHandlers(): void {
           if (!stats.isDirectory()) return
           if (ignoreDirs.has(name)) return
 
+          if (target.length >= INDEX_ENTRY_CAP_PER_GROUP) return
           target.push({
             name: name === 'workspace-files' ? '项目文件' : name,
             path: attachedPath,
@@ -3784,21 +4046,40 @@ export function registerIpcHandlers(): void {
         }
       }
 
-      // session 目录：相对路径
-      scan(safeRoot, 0, safeRoot, rootEntries, false, 'session')
+      const cacheKey = JSON.stringify([safeRoot, resolvedAdditionalPaths, resolvedSessionPaths])
+      const now = Date.now()
+      const cachedIndex = workspaceFileSearchIndexCache.get(cacheKey)
+      if (cachedIndex && cachedIndex.expiresAt > now) {
+        // 查询排序会原地修改数组；每次从缓存复制外壳，索引条目本身保持只读复用。
+        rootEntries = [...cachedIndex.rootEntries]
+        workspaceEntries = [...cachedIndex.workspaceEntries]
+      } else {
+        // session 目录：相对路径
+        scan(safeRoot, 0, safeRoot, rootEntries, false, 'session')
 
-      // 会话级附加路径：绝对路径，标记为 session（归入会话文件分组）
-      if (sessionPaths && sessionPaths.length > 0) {
-        for (const sp of sessionPaths) {
-          addAttachedPath(sp, rootEntries, 'session')
+        // 会话级附加路径：绝对路径，标记为 session（归入会话文件分组）
+        for (const sessionPath of resolvedSessionPaths) {
+          addAttachedPath(sessionPath, rootEntries, 'session')
         }
-      }
 
-      // 工作区文件 + 工作区级附加路径：绝对路径，标记为 workspace
-      if (additionalPaths && additionalPaths.length > 0) {
-        for (const addPath of additionalPaths) {
-          addAttachedPath(addPath, workspaceEntries, 'workspace')
+        // 工作区文件 + 工作区级附加路径：绝对路径，标记为 workspace
+        for (const additionalPath of resolvedAdditionalPaths) {
+          addAttachedPath(additionalPath, workspaceEntries, 'workspace')
         }
+
+        for (const [key, cached] of workspaceFileSearchIndexCache) {
+          if (cached.expiresAt <= now) workspaceFileSearchIndexCache.delete(key)
+        }
+        while (workspaceFileSearchIndexCache.size >= WORKSPACE_FILE_INDEX_CACHE_MAX_ENTRIES) {
+          const oldestKey = workspaceFileSearchIndexCache.keys().next().value
+          if (typeof oldestKey !== 'string') break
+          workspaceFileSearchIndexCache.delete(oldestKey)
+        }
+        workspaceFileSearchIndexCache.set(cacheKey, {
+          expiresAt: now + WORKSPACE_FILE_INDEX_CACHE_TTL_MS,
+          rootEntries: [...rootEntries],
+          workspaceEntries: [...workspaceEntries],
+        })
       }
 
       // 连续排序：来源仅用于解析与 badge，不作为结果分组依据。
@@ -4108,8 +4389,8 @@ export function registerIpcHandlers(): void {
   // 测试飞书连接
   ipcMain.handle(
     FEISHU_IPC_CHANNELS.TEST_CONNECTION,
-    async (_, appId: string, appSecret: string): Promise<FeishuTestResult> => {
-      return feishuBridgeManager.testConnection(appId, appSecret)
+    async (_, appId: string, appSecret: string, domain?: import('@proma/shared').FeishuDomain): Promise<FeishuTestResult> => {
+      return feishuBridgeManager.testConnection(appId, appSecret, domain)
     }
   )
 
@@ -4446,14 +4727,6 @@ export function registerIpcHandlers(): void {
     return cleanupTempFiles()
   })
 
-  // 迁移取消时清理临时解压目录
-  ipcMain.handle('migration:cancelImport', async (_, tempDir: string) => {
-    if (tempDir && existsSync(tempDir) && tempDir.includes('proma-import-')) {
-      rmSync(tempDir, { recursive: true, force: true })
-      console.log(`[迁移] 已清理临时目录: ${tempDir}`)
-    }
-  })
-
   // 启动时自动清理临时文件
   const runStartupCleanup = async (): Promise<void> => {
     try {
@@ -4699,61 +4972,10 @@ export function registerIpcHandlers(): void {
 
   // ===== 数据迁移 =====
 
-  ipcMain.handle('migration:getExportPreview', async (_, workspaceId: string) => {
-    const { getExportPreview } = await import('./lib/migration-service')
-    return getExportPreview(workspaceId)
-  })
-
-  ipcMain.handle('migration:getShareExportPreview', async () => {
-    const { getShareExportPreview } = await import('./lib/migration-service')
-    return getShareExportPreview()
-  })
-
-  ipcMain.handle('migration:export', async (_, options) => {
-    const { exportData } = await import('./lib/migration-service')
-    return exportData(options)
-  })
-
-  ipcMain.handle('migration:exportV2', async (_, options) => {
-    const { exportDataV2 } = await import('./lib/migration-service')
-    return exportDataV2(options)
-  })
-
-  ipcMain.handle('migration:parseImportFile', async (_, filePath: string) => {
-    const { parseImportFile } = await import('./lib/migration-service')
-    return parseImportFile(filePath)
-  })
-
-  ipcMain.handle('migration:confirmImport', async (_, options) => {
-    const { confirmImport } = await import('./lib/migration-service')
-    return confirmImport(options)
-  })
-
-  ipcMain.handle('migration:openFileDialog', async () => {
-    const { dialog } = await import('electron')
-    const result = await dialog.showOpenDialog({
-      title: '选择迁移文件',
-      filters: [
-        { name: 'Proma 迁移文件', extensions: ['proma-backup', 'proma-share'] },
-        { name: '所有文件', extensions: ['*'] },
-      ],
-      properties: ['openFile'],
-    })
-    return result.canceled ? null : result.filePaths[0]
-  })
-
-  ipcMain.handle('migration:saveFileDialog', async (_, mode: string) => {
-    const { dialog } = await import('electron')
-    const ext = mode === 'personal' ? 'proma-backup' : 'proma-share'
-    const defaultName = `proma-migration-${new Date().toISOString().slice(0, 10)}.${ext}`
-    const result = await dialog.showSaveDialog({
-      title: '保存迁移文件',
-      defaultPath: defaultName,
-      filters: [
-        { name: mode === 'personal' ? 'Proma 个人备份' : 'Proma 分享包', extensions: [ext] },
-      ],
-    })
-    return result.canceled ? null : result.filePath
+  ipcMain.handle('migration:open-data-folder', async (): Promise<void> => {
+    const dataDir = getConfigDir()
+    const error = await shell.openPath(dataDir)
+    if (error) throw new Error(`无法打开 Proma 数据文件夹：${error}`)
   })
 
   // ===== 窗口控制（Windows 自定义标题栏按钮）=====
@@ -4822,11 +5044,6 @@ export function registerIpcHandlers(): void {
     return query
   }
 
-  ipcMain.handle(PLANNING_IPC_CHANNELS.OPEN_WINDOW, async (): Promise<void> => {
-    const { showPlanningWindow } = await import('./lib/planning-window')
-    showPlanningWindow()
-  })
-
   ipcMain.handle(PLANNING_IPC_CHANNELS.LIST_TODOS, async (_, input?: unknown): Promise<Todo[]> => listTodos(parseTodoListQuery(input)))
   ipcMain.handle(PLANNING_IPC_CHANNELS.CREATE_TODO, async (_, input: CreateTodoInput): Promise<Todo> => {
     if (!input || !isPlanningTitle(input.title)) throw new Error('Todo 标题不能为空且不能超过 500 字')
@@ -4838,8 +5055,8 @@ export function registerIpcHandlers(): void {
     return todo
   })
   // Todo 项目归属更新与 Agent 会话创建必须在一次主进程同步处理内完成，
-  // 避免多个 Planning 窗口之间在校验、更新和创建会话的间隙发生 TOCTOU。
-  ipcMain.handle(PLANNING_IPC_CHANNELS.START_TODO_AGENT, (event, input: StartTodoAgentInput): StartTodoAgentResult => {
+  // 避免项目选择、Todo 更新与会话创建之间出现状态竞争。
+  ipcMain.handle(PLANNING_IPC_CHANNELS.START_TODO_AGENT, (_, input: StartTodoAgentInput): StartTodoAgentResult => {
     if (!input || typeof input.todoId !== 'string' || !input.todoId.trim()) throw new Error('Todo id 必填')
     if (typeof input.workspaceId !== 'string' || !input.workspaceId.trim()) throw new Error('项目 id 必填')
     if (!isPlanningTimestamp(input.expectedUpdatedAt)) throw new Error('Todo expectedUpdatedAt 非法')
@@ -4859,7 +5076,7 @@ export function registerIpcHandlers(): void {
         expectedUpdatedAt: existing.updatedAt,
       })
     if (!todo) throw new Error('Todo 不存在')
-    if (todo !== existing) broadcastPlanningChanged(['todos', 'reminders'])
+    if (todo !== existing) broadcastPlanningChanged(['todos', 'reminders'], { todo })
 
     const session = createAgentSession(
       `处理：${todo.title}`,
@@ -4872,25 +5089,6 @@ export function registerIpcHandlers(): void {
       console.error('[飞书 Session 镜像] Todo 启动会话建群失败:', error)
     })
 
-    // 独立规划窗口没有 AgentView，需由主窗口接手打开会话并消费自动启动提示。
-    try {
-      const sourceWindowKind = new URL(event.sender.getURL()).searchParams.get('window')
-      if (sourceWindowKind === 'planning') {
-        const mainWindow = BrowserWindow.getAllWindows().find((win) => {
-          if (win.isDestroyed() || win.webContents.id === event.sender.id) return false
-          return new URL(win.webContents.getURL()).searchParams.get('window') === null
-        })
-        if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore()
-          mainWindow.show()
-          mainWindow.focus()
-          const activation: TodoAgentSessionActivation = { todo, session }
-          mainWindow.webContents.send(PLANNING_IPC_CHANNELS.TODO_AGENT_SESSION_READY, activation)
-        }
-      }
-    } catch (error) {
-      console.error('[任务/日程] 转交 Todo Agent 会话到主窗口失败:', error)
-    }
     return { todo, session }
   })
   ipcMain.handle(PLANNING_IPC_CHANNELS.UPDATE_TODO, async (_, input: UpdateTodoInput): Promise<Todo | undefined> => {
@@ -4901,7 +5099,7 @@ export function registerIpcHandlers(): void {
     if (input.dueAt !== undefined && input.dueAt !== null && !isPlanningTimestamp(input.dueAt)) throw new Error('Todo dueAt 非法')
     if (input.expectedUpdatedAt !== undefined && !isPlanningTimestamp(input.expectedUpdatedAt)) throw new Error('Todo expectedUpdatedAt 非法')
     const todo = updateTodo(input)
-    if (todo) broadcastPlanningChanged(['todos', 'reminders'])
+    if (todo) broadcastPlanningChanged(['todos', 'reminders'], { todo })
     return todo
   })
   ipcMain.handle(PLANNING_IPC_CHANNELS.DELETE_TODO, async (_, id: string): Promise<boolean> => {
@@ -5076,6 +5274,15 @@ export function registerIpcHandlers(): void {
     if (i.timeOfDay !== undefined && !validTimeOfDay(i.timeOfDay)) {
       throw new Error(`非法的 timeOfDay: ${String(i.timeOfDay)}`)
     }
+    if (i.activeWindowStart !== undefined && i.activeWindowStart !== null && !validTimeOfDay(i.activeWindowStart)) {
+      throw new Error(`非法的 activeWindowStart: ${String(i.activeWindowStart)}`)
+    }
+    if (i.activeWindowEnd !== undefined && i.activeWindowEnd !== null && !validTimeOfDay(i.activeWindowEnd)) {
+      throw new Error(`非法的 activeWindowEnd: ${String(i.activeWindowEnd)}`)
+    }
+    if (i.activeWeekdays !== undefined && i.activeWeekdays !== null && (!Array.isArray(i.activeWeekdays) || i.activeWeekdays.some((day) => !isFiniteInt(day) || day < 0 || day > 6))) {
+      throw new Error(`非法的 activeWeekdays: ${String(i.activeWeekdays)}`)
+    }
     if (i.dayOfWeek !== undefined && (!isFiniteInt(i.dayOfWeek) || i.dayOfWeek < 0 || i.dayOfWeek > 6)) {
       throw new Error(`非法的 dayOfWeek: ${String(i.dayOfWeek)}`)
     }
@@ -5085,7 +5292,7 @@ export function registerIpcHandlers(): void {
     if (i.scheduledAt !== undefined && (typeof i.scheduledAt !== 'number' || !Number.isFinite(i.scheduledAt) || i.scheduledAt <= 0)) {
       throw new Error(`非法的 scheduledAt: ${String(i.scheduledAt)}`)
     }
-    if (i.maxRuns !== undefined && (!isFiniteInt(i.maxRuns) || i.maxRuns < 1)) {
+    if (i.maxRuns !== undefined && i.maxRuns !== null && (!isFiniteInt(i.maxRuns) || i.maxRuns < 1)) {
       throw new Error(`非法的 maxRuns: ${String(i.maxRuns)}`)
     }
     if (i.permissionMode !== undefined && !validPermissionMode(i.permissionMode)) {
@@ -5104,27 +5311,35 @@ export function registerIpcHandlers(): void {
     existing?: Automation,
   ): void => {
     const scheduleType = input.scheduleType ?? existing?.scheduleType
-    if (scheduleType === 'interval') {
-      const intervalMinutes = input.intervalMinutes ?? existing?.intervalMinutes
-      if (!isFiniteInt(intervalMinutes) || intervalMinutes < 1) throw new Error('scheduleType=interval 时 intervalMinutes 必填')
+    if (!scheduleType) throw new Error('scheduleType 必填')
+    validateExplicitAutomationScheduleFields(input, scheduleType)
+    const effective = getEffectiveAutomationScheduleFields(input, existing)
+    if (effective.scheduleType === 'interval') {
+      if (!isFiniteInt(effective.intervalMinutes) || effective.intervalMinutes < 1) throw new Error('scheduleType=interval 时 intervalMinutes 必填')
     }
-    if (scheduleType === 'daily' || scheduleType === 'weekly' || scheduleType === 'monthly') {
-      const timeOfDay = input.timeOfDay ?? existing?.timeOfDay
-      if (!validTimeOfDay(timeOfDay)) throw new Error('scheduleType=daily/weekly/monthly 时 timeOfDay 必填')
+    if ((effective.activeWindowStart === undefined) !== (effective.activeWindowEnd === undefined)) {
+      throw new Error('activeWindowStart 与 activeWindowEnd 必须同时设置或同时清除')
     }
-    if (scheduleType === 'weekly') {
-      const dayOfWeek = input.dayOfWeek ?? existing?.dayOfWeek
-      if (!isFiniteInt(dayOfWeek)) throw new Error('scheduleType=weekly 时 dayOfWeek 必填')
+    if (effective.activeWeekdays !== undefined && effective.activeWeekdays.length > 0 && effective.scheduleType !== 'interval') {
+      throw new Error('周内运行日限制仅支持 scheduleType=interval')
     }
-    if (scheduleType === 'monthly') {
-      const dayOfMonth = input.dayOfMonth ?? existing?.dayOfMonth
-      if (!isFiniteInt(dayOfMonth)) throw new Error('scheduleType=monthly 时 dayOfMonth 必填')
-    }
-    if (scheduleType === 'once') {
-      const scheduledAt = input.scheduledAt ?? existing?.scheduledAt
-      if (typeof scheduledAt !== 'number' || !Number.isFinite(scheduledAt) || scheduledAt <= 0) {
-        throw new Error('scheduleType=once 时 scheduledAt 必填')
+    if (effective.activeWindowStart !== undefined && effective.activeWindowEnd !== undefined) {
+      if (effective.scheduleType !== 'interval') throw new Error('每日执行窗口仅支持 scheduleType=interval')
+      if (!validTimeOfDay(effective.activeWindowStart) || !validTimeOfDay(effective.activeWindowEnd) || effective.activeWindowStart >= effective.activeWindowEnd) {
+        throw new Error('每日执行窗口必须是同一天内有效的 HH:MM 范围，且开始早于结束')
       }
+    }
+    if (effective.scheduleType === 'daily' || effective.scheduleType === 'weekly' || effective.scheduleType === 'monthly') {
+      if (!validTimeOfDay(effective.timeOfDay)) throw new Error('scheduleType=daily/weekly/monthly 时 timeOfDay 必填')
+    }
+    if (effective.scheduleType === 'weekly' && !isFiniteInt(effective.dayOfWeek)) {
+      throw new Error('scheduleType=weekly 时 dayOfWeek 必填')
+    }
+    if (effective.scheduleType === 'monthly' && !isFiniteInt(effective.dayOfMonth)) {
+      throw new Error('scheduleType=monthly 时 dayOfMonth 必填')
+    }
+    if (effective.scheduleType === 'once' && (typeof effective.scheduledAt !== 'number' || !Number.isFinite(effective.scheduledAt) || effective.scheduledAt <= 0)) {
+      throw new Error('scheduleType=once 时 scheduledAt 必填')
     }
   }
 
@@ -5193,4 +5408,43 @@ export function registerIpcHandlers(): void {
       await runAutomationNow(id)
     }
   )
+
+  // ===== Agent Island =====
+
+  // Renderer 在主窗口创建后即可上报“已查看”，而 Island 状态机稍后才初始化，
+  // 且在不支持的平台也不会初始化。handler 必须在 IPC 注册阶段无条件存在，避免启动竞态。
+  ipcMain.handle(
+    AGENT_ISLAND_IPC_CHANNELS.MARK_SESSION_VIEWED,
+    async (_, sessionId: unknown): Promise<void> => {
+      if (!isNonEmptyString(sessionId)) return
+      markAgentIslandSessionViewed(sessionId)
+    }
+  )
+
+  // ===== Windows Agent Island =====
+
+  ipcMain.handle(
+    WINDOWS_AGENT_ISLAND_IPC_CHANNELS.OPEN_SESSION,
+    async (_, sessionId: unknown, title: unknown): Promise<void> => {
+      if (!isNonEmptyString(sessionId)) return
+      markAgentIslandSessionViewed(sessionId)
+      const { getMainWindow } = await import('./index')
+      const mainWindow = getMainWindow()
+      if (!mainWindow) return
+      mainWindow.webContents.send(TRAY_IPC_CHANNELS.OPEN_AGENT_SESSION, {
+        sessionId,
+        title: typeof title === 'string' ? title : '',
+      })
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  )
+
+  ipcMain.on(WINDOWS_AGENT_ISLAND_IPC_CHANNELS.MOUSE_ENTER, () => {
+    getAgentStatusHoverWindow().onHoverMouseEnter()
+  })
+  ipcMain.on(WINDOWS_AGENT_ISLAND_IPC_CHANNELS.MOUSE_LEAVE, () => {
+    getAgentStatusHoverWindow().onHoverMouseLeave()
+  })
 }

@@ -1,31 +1,29 @@
 /**
  * DiffTabContent — 单文件 Diff 或纯文件预览内容
  *
- * previewOnly=true 时：代码高亮预览（@pierre/diffs File）或 Markdown 渲染
+ * previewOnly=true 时：代码高亮预览（@pierre/diffs File）、Markdown 或 HTML 渲染
  * previewOnly=false（默认）：显示 git diff（旧版本 vs 磁盘）
  */
 
 import * as React from 'react'
-import { ChevronRight, Code2, Copy, Check, Eye, List, Pencil, RefreshCw, Save, WrapText, X } from 'lucide-react'
+import { ChevronRight, Code2, Copy, Check, Eye, FolderOpen, List, Pencil, RotateCw, Save, WrapText, X } from 'lucide-react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import DOMPurify from 'dompurify'
 import { File as PierreFile } from '@pierre/diffs/react'
 import { toast } from 'sonner'
+import type { FilePreviewMetadata } from '@proma/shared'
 import { cn } from '@/lib/utils'
 import {
   agentDiffPanelTabAtom,
   agentDiffViewModeAtom,
   agentDiffRefreshVersionAtom,
-  agentSidePanelOpenAtom,
+  agentSidePanelOpenAtomFamily,
+  agentSessionsAtom,
+  agentSideTemporaryAgentMapAtom,
+  getExplorationSidePanelTab,
 } from '@/atoms/agent-atoms'
 import { resolvedThemeAtom } from '@/atoms/theme'
 import { previewCodeWrapAtom, quotedSelectionMapAtom } from '@/atoms/preview-atoms'
-import {
-  agentSideChatMapAtom,
-  conversationsAtom,
-  conversationDraftsAtom,
-  selectedModelAtom,
-} from '@/atoms/chat-atoms'
 import { markdownTocOpenAtom } from '@/atoms/markdown-toc'
 import { useFocusAgentSessionInput } from '@/hooks/useFocusAgentSessionInput'
 import { useShortcut } from '@/hooks/useShortcut'
@@ -33,6 +31,8 @@ import { initShortcutRegistry } from '@/lib/shortcut-registry'
 import { DiffView } from './DiffView'
 import { MarkdownRichEditor } from './MarkdownRichEditor'
 import { getPreviewCandidateBasePaths, isAbsoluteFilePath } from './preview-open-path'
+import { DefaultAppOpenButton } from './DefaultAppOpenButton'
+import { UnsupportedFilePreview } from './UnsupportedFilePreview'
 import { PreviewFindBar } from './PreviewFindBar'
 import { MarkdownToc } from './MarkdownToc'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -56,12 +56,26 @@ import {
 } from '@/lib/markdown-editor-state'
 
 const MD_EXTS = new Set(['.md', '.markdown'])
+const HTML_EXTS = new Set(['.html', '.htm'])
 const PLAIN_TEXT_EDIT_EXTS = new Set(['.txt', '.text', '.log'])
 const PDF_EXTS = new Set(['.pdf'])
 const DOCX_EXTS = new Set(['.docx'])
 const OFFICE_PREVIEW_EXTS = new Set(['.xlsx', '.pptx'])
 const LEGACY_OFFICE_EXTS = new Set(['.doc', '.xls', '.ppt'])
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'])
+
+function getPreviewPathLabel(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).at(-1) || filePath
+}
+
+function getPreviewTargetPath(filePath: string, dirPath: string): string {
+  return isAbsoluteFilePath(filePath) ? filePath : `${dirPath.replace(/[\\/]+$/, '')}/${filePath}`
+}
+
+function getParentFolderPath(filePath: string): string {
+  const separator = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  return separator > 0 ? filePath.slice(0, separator) : filePath
+}
 const FILE_FIND_SHORTCUT_OPTIONS = { exclusive: true }
 
 /**
@@ -82,6 +96,12 @@ type CacheEntry = {
   docxHtml?: string
   officeHtml?: string
   officeText?: string
+  /** HTML 预览的目录级 token URL，允许加载同目录相对资源 */
+  htmlPreviewUrl?: string
+  /** 二进制或其他不可安全内联渲染的文件提示 */
+  unsupportedPreviewReason?: string
+  /** 无法内联预览时由主进程返回的安全基础元数据。 */
+  previewMetadata?: FilePreviewMetadata
 }
 
 interface DeepSelection {
@@ -242,6 +262,10 @@ interface DiffTabContentProps {
   readOnly?: boolean
   /** 候选基础目录（previewOnly 模式下用于路径解析） */
   basePaths?: string[]
+  /** Managed Skill workspace slug for a relocatable relative path. */
+  workspaceSkillSlug?: string
+  /** Original absolute Skill entry path used as a legacy fallback. */
+  legacySkillFilePath?: string
   /** diff 模式下检测到内容为空（无差异）时回调，用于自动关闭预览面板 */
   onEmptyDiff?: () => void
   /** 由外层场景注入的额外工具按钮，例如默认应用打开、返回会话 */
@@ -250,14 +274,16 @@ interface DiffTabContentProps {
   baseRef?: string
 }
 
-export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewOnly, readOnly, basePaths, onEmptyDiff, toolbarActions, baseRef }: DiffTabContentProps): React.ReactElement {
+export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewOnly, readOnly, basePaths, workspaceSkillSlug, legacySkillFilePath, onEmptyDiff, toolbarActions, baseRef }: DiffTabContentProps): React.ReactElement {
   const ext = getExtension(filePath)
   const isMarkdown = previewOnly && MD_EXTS.has(ext)
+  const isHtml = previewOnly && HTML_EXTS.has(ext)
   const isPlainTextEditable = previewOnly && PLAIN_TEXT_EDIT_EXTS.has(ext)
   const isEditableText = isMarkdown || isPlainTextEditable
   const isPdf = previewOnly && PDF_EXTS.has(ext)
   const isDocx = previewOnly && DOCX_EXTS.has(ext)
-  const isOfficePreview = previewOnly && OFFICE_PREVIEW_EXTS.has(ext)
+  // XLSX/PPTX 没有可读的文本 diff；无论从文件区还是改动区打开都走 Office 预览。
+  const isOfficePreview = OFFICE_PREVIEW_EXTS.has(ext)
   const isLegacyOffice = previewOnly && LEGACY_OFFICE_EXTS.has(ext)
   const isImage = previewOnly && IMAGE_EXTS.has(ext)
   const markdownEditorCacheKey = React.useMemo(
@@ -273,6 +299,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const [viewMode, setViewMode] = useAtom(agentDiffViewModeAtom)
   const [oldContent, setOldContent] = React.useState('')
   const [newContent, setNewContent] = React.useState('')
+  const [unsupportedPreviewReason, setUnsupportedPreviewReason] = React.useState('')
+  const [previewMetadata, setPreviewMetadata] = React.useState<FilePreviewMetadata | undefined>()
   const [markdownEditing, setMarkdownEditing] = React.useState(
     () => Boolean(initialMarkdownEditorState?.editing),
   )
@@ -319,6 +347,9 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const [docxHtml, setDocxHtml] = React.useState('')
   const [officeHtml, setOfficeHtml] = React.useState('')
   const [officeText, setOfficeText] = React.useState('')
+  // HTML 默认展示运行后的页面；用户可随时切换回源码高亮预览。
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = React.useState('')
+  const [htmlSourceMode, setHtmlSourceMode] = React.useState(false)
   const [pdfSrc, setPdfSrc] = React.useState('')
   const [pdfZoom, setPdfZoom] = React.useState(100)
   const pdfIframeRef = React.useRef<HTMLIFrameElement>(null)
@@ -346,6 +377,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     previewOnly &&
     !activeMarkdownEditing &&
     !isMarkdown &&
+    (!isHtml || htmlSourceMode) &&
     !isPdf &&
     !isImage &&
     !isDocx &&
@@ -377,9 +409,11 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     oldLength: oldContent.length,
     docxLength: docxHtml.length,
     officeLength: officeHtml.length,
+    htmlPreviewUrl,
+    htmlSourceMode,
     markdownEditing: activeMarkdownEditing,
     markdownSourceMode: activeMarkdownEditing && markdownSourceMode,
-  }), [docxHtml.length, filePath, loading, activeMarkdownEditing, markdownSourceMode, newContent.length, officeHtml.length, oldContent.length, previewOnly, viewMode])
+  }), [docxHtml.length, filePath, loading, activeMarkdownEditing, markdownSourceMode, newContent.length, officeHtml.length, htmlPreviewUrl, htmlSourceMode, oldContent.length, previewOnly, viewMode])
 
   // 目录提取只需在「文件本身或其内容」变化时重建，避免 loading/编辑态切换造成的抖动
   const tocContentKey = React.useMemo(
@@ -390,11 +424,10 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   // ===== 选中文本引用（Quoted Selection）=====
 
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
-  const selectedChatModel = useAtomValue(selectedModelAtom)
-  const setConversations = useSetAtom(conversationsAtom)
-  const setConversationDrafts = useSetAtom(conversationDraftsAtom)
-  const setSideChatMap = useSetAtom(agentSideChatMapAtom)
-  const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtom)
+  const agentSessions = useAtomValue(agentSessionsAtom)
+  const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setSideTemporaryAgentMap = useSetAtom(agentSideTemporaryAgentMapAtom)
+  const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtomFamily(sessionId))
   const setSidePanelTabMap = useSetAtom(agentDiffPanelTabAtom)
   const focusAgentSessionInput = useFocusAgentSessionInput()
   const [previewSelection, setPreviewSelection] = React.useState<PreviewTextSelection | null>(null)
@@ -403,7 +436,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const shadowRootsRef = React.useRef<Set<ShadowRoot>>(new Set())
   const pointerSelectingRef = React.useRef(false)
   const captureTimerRef = React.useRef<number | null>(null)
-  const openSelectionChatPendingRef = React.useRef(false)
+  const openTemporaryAgentPendingRef = React.useRef(false)
   /** 当前正在展示的截断 toast id；选中回落到上限内或选区消失时主动 dismiss */
   const lastToastIdRef = React.useRef<string | null>(null)
 
@@ -548,10 +581,12 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     sessionId,
     // 预览必须覆盖 Agent 实际操作的外部文件，与右侧文件面板保持一致。
     unrestricted: true,
+    ...(workspaceSkillSlug ? { workspaceSkillSlug } : {}),
+    ...(legacySkillFilePath ? { legacySkillFilePath } : {}),
     // 历史工具调用的预览仅有相对 filePath；以当前 dirPath（通常是会话 CWD）补全解析上下文。
     // 绝对路径不追加该回退，避免失效路径按同名文件误命中会话目录。
     candidateBasePaths: getPreviewCandidateBasePaths(basePaths, isAbsoluteFilePath(filePath) ? undefined : dirPath),
-  }), [sessionId, basePaths, dirPath, filePath])
+  }), [sessionId, basePaths, dirPath, filePath, workspaceSkillSlug, legacySkillFilePath])
 
   const contentCacheScope = React.useMemo(() => JSON.stringify({
     dirPath,
@@ -585,8 +620,13 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     for (const basePath of basePaths ?? []) {
       if (basePath && !candidateBasePaths.includes(basePath)) candidateBasePaths.push(basePath)
     }
-    return { sessionId, candidateBasePaths }
-  }, [basePaths, dirPath, filePath, sessionId])
+    return {
+      sessionId,
+      ...(workspaceSkillSlug ? { workspaceSkillSlug } : {}),
+      ...(legacySkillFilePath ? { legacySkillFilePath } : {}),
+      candidateBasePaths,
+    }
+  }, [basePaths, dirPath, filePath, sessionId, workspaceSkillSlug, legacySkillFilePath])
 
   // props 变化时立即清空内容状态，避免在 useEffect 执行前渲染旧数据
   React.useEffect(() => {
@@ -609,6 +649,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     setDocxHtml('')
     setOfficeHtml('')
     setOfficeText('')
+    setHtmlPreviewUrl('')
+    setHtmlSourceMode(false)
     setPdfSrc('')
     setPdfZoom(100)
     setImagePath('')
@@ -771,6 +813,9 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       setDocxHtml(cached.docxHtml ?? '')
       setOfficeHtml(cached.officeHtml ?? '')
       setOfficeText(cached.officeText ?? '')
+      setHtmlPreviewUrl(cached.htmlPreviewUrl ?? '')
+      setUnsupportedPreviewReason(cached.unsupportedPreviewReason ?? '')
+      setPreviewMetadata(cached.previewMetadata)
       setPdfSrc(cached.pdfSrc ?? '')
       setPdfZoom(100)
       setImagePath(cached.imagePath ?? '')
@@ -791,6 +836,9 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
         setDocxHtml('')
         setOfficeHtml('')
         setOfficeText('')
+        setHtmlPreviewUrl('')
+        setUnsupportedPreviewReason('')
+        setPreviewMetadata(undefined)
         setPdfSrc('')
         setPdfZoom(100)
         setImagePath('')
@@ -811,8 +859,20 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       try {
         let content = cached?.newContent ?? ''
         let old = cached?.oldContent ?? ''
+        let htmlUrl = cached?.htmlPreviewUrl ?? ''
 
         if (!cached) {
+          // 即使从「改动」列表点开，XLSX/PPTX 也应保留原有的 Office 内联预览。
+          if (isOfficePreview) {
+            const result = await window.electronAPI.officeToHtml(filePath, fileAccess)
+            if (cancelled) return
+            const html = DOMPurify.sanitize(result?.html ?? '')
+            const text = result?.text ?? ''
+            setOfficeHtml(html)
+            setOfficeText(text)
+            cacheSet(cacheKey, { oldContent: '', newContent: '', officeHtml: html, officeText: text })
+            return
+          }
           if (previewOnly) {
             if (isPdf) {
               const result = await window.electronAPI.preparePdfPreview(filePath, fileAccess)
@@ -844,22 +904,32 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
               cacheSet(cacheKey, { oldContent: '', newContent: '', docxHtml: html })
               return
             }
-            if (isOfficePreview) {
-              const result = await window.electronAPI.officeToHtml(filePath, fileAccess)
-              if (cancelled) return
-              const html = DOMPurify.sanitize(result?.html ?? '')
-              const text = result?.text ?? ''
-              setOfficeHtml(html)
-              setOfficeText(text)
-              cacheSet(cacheKey, { oldContent: '', newContent: '', officeHtml: html, officeText: text })
-              return
-            }
             if (isLegacyOffice) {
               return
             }
             const result = await window.electronAPI.resolveAndReadFile(filePath, fileAccess)
             if (cancelled) return
+            if (result?.isBinary || result?.isTooLarge) {
+              const reason = result.isTooLarge
+                ? '此文本文件超过 5 MB，无法安全进行内联预览，请使用默认应用打开。'
+                : '此二进制或编码异常文件暂不支持内联预览，请使用默认应用打开。'
+              setUnsupportedPreviewReason(reason)
+              setPreviewMetadata(result.metadata)
+              cacheSet(cacheKey, {
+                oldContent: '',
+                newContent: '',
+                unsupportedPreviewReason: reason,
+                previewMetadata: result.metadata,
+              })
+              return
+            }
             content = result?.content ?? ''
+            if (isHtml) {
+              const preview = await window.electronAPI.resolveHtmlPreviewPath(filePath, fileAccess)
+              if (cancelled) return
+              htmlUrl = preview?.url ?? ''
+              setHtmlPreviewUrl(htmlUrl)
+            }
           } else {
             const result = await window.electronAPI.getDiffContents({ dirPath, filePath, gitRoot, sessionId, baseRef })
             if (cancelled) return
@@ -875,7 +945,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           setOldContent(old)
           setNewContent(content)
 
-          if (cacheKey) cacheSet(cacheKey, { oldContent: old, newContent: content })
+          if (cacheKey) cacheSet(cacheKey, { oldContent: old, newContent: content, htmlPreviewUrl: htmlUrl || undefined })
         }
 
         if (previewOnly && !MD_EXTS.has(ext) && content) {
@@ -891,7 +961,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     load()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, dirPath, gitRoot, previewOnly, previewContentVersion, fileAccess, isPdf, isDocx, isOfficePreview, isLegacyOffice, isImage, sessionId, ext, getContentCacheKey])
+  }, [filePath, dirPath, gitRoot, previewOnly, previewContentVersion, fileAccess, isPdf, isDocx, isOfficePreview, isLegacyOffice, isImage, isHtml, sessionId, ext, getContentCacheKey])
 
   // refreshVersion 触发的静默刷新：仅 diff 模式、内容有变化时才更新 state
   const prevRefreshRef = React.useRef(-1)
@@ -933,17 +1003,17 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     emptyDiffFiredRef.current = false
   }, [filePath, sessionId])
   React.useEffect(() => {
-    if (previewOnly || loading || emptyDiffFiredRef.current) return
+    if (previewOnly || isOfficePreview || loading || emptyDiffFiredRef.current) return
     if (oldContent === newContent) {
       emptyDiffFiredRef.current = true
       onEmptyDiff?.()
     }
-  }, [previewOnly, loading, oldContent, newContent, onEmptyDiff])
+  }, [previewOnly, isOfficePreview, loading, oldContent, newContent, onEmptyDiff])
 
   // previewOnly 模式：加载完成后若内容无法预览，弹 Toast 通知用户
   const toastedPreviewFailRef = React.useRef('')
   React.useEffect(() => {
-    if (!previewOnly || loading) return
+    if ((!previewOnly && !isOfficePreview) || loading) return
     const key = `${filePath}:${ext}`
     if (toastedPreviewFailRef.current === key) return
     let message: string | null = null
@@ -962,7 +1032,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       toastedPreviewFailRef.current = key
       toast.warning(message)
     }
-  }, [previewOnly, loading, filePath, ext, isLegacyOffice, isPdf, pdfSrc, isDocx, docxHtml, isOfficePreview, officeHtml, isImage, imageDataUrl])
+  }, [previewOnly, isOfficePreview, loading, filePath, ext, isLegacyOffice, isPdf, pdfSrc, isDocx, docxHtml, officeHtml, isImage, imageDataUrl])
 
   // scrollPosition persistent: module-level Map scoped by session, file path, and resolution context
   // content changes (refreshVersion bump) → delete stored position;
@@ -1286,67 +1356,55 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     focusAgentSessionInput(sessionId)
   }, [clearPreviewSelection, focusAgentSessionInput, previewSelection, sessionId, setQuotedSelectionMap])
 
-  const handleOpenSelectionChat = React.useCallback(async (): Promise<void> => {
-    if (!previewSelection) return
-    if (openSelectionChatPendingRef.current) return
-    openSelectionChatPendingRef.current = true
+  const handleOpenExplorationBranch = React.useCallback(async (): Promise<void> => {
+    if (!previewSelection || openTemporaryAgentPendingRef.current) return
+    const parentSession = agentSessions.find((item) => item.id === sessionId)
+    // 文件预览不是一条对话消息；从当前主线最近一个可恢复的 Pi 节点分叉。
+    const sourceMessageId = Object.keys(parentSession?.piEntryBindings ?? {}).at(-1)
+    if (!sourceMessageId) {
+      toast.info('当前还没有可探索的 Agent 回复，请先完成一轮对话')
+      return
+    }
+
+    openTemporaryAgentPendingRef.current = true
     try {
-      const conversation = await window.electronAPI.createConversation(
-        '预览选区问答',
-        selectedChatModel?.modelId,
-        selectedChatModel?.channelId,
-      )
-      setConversations((prev) => {
-        if (prev.some((item) => item.id === conversation.id)) return prev
-        return [conversation, ...prev]
+      const branch = await window.electronAPI.forkAgentSession({
+        sessionId,
+        upToMessageUuid: sourceMessageId,
+        explorationSourceLabel: `当前节点 · ${getPreviewPathLabel(previewSelection.filePath)}`,
       })
-      setConversationDrafts((prev) => {
+      setAgentSessions((prev) => prev.some((item) => item.id === branch.id) ? prev : [branch, ...prev])
+      setQuotedSelectionMap((prev) => new Map(prev).set(branch.id, {
+        text: previewSelection.text,
+        filePath: previewSelection.filePath,
+        sourceType: 'file',
+        sourceLabel: previewSelection.filePath,
+        capturedAt: Date.now(),
+      }))
+      setSideTemporaryAgentMap((prev) => {
+        const openBranches = prev.get(sessionId) ?? []
         const next = new Map(prev)
-        next.set(conversation.id, '我的问题：')
-        return next
-      })
-      setQuotedSelectionMap((prev) => {
-        const next = new Map(prev)
-        next.set(conversation.id, {
-          text: previewSelection.text,
-          filePath: previewSelection.filePath,
-          sourceType: 'file',
-          sourceLabel: previewSelection.filePath,
-          capturedAt: Date.now(),
-        })
-        return next
-      })
-      setSideChatMap((prev) => {
-        const next = new Map(prev)
-        next.set(sessionId, conversation.id)
+        next.set(sessionId, openBranches.some((item) => item.sessionId === branch.id)
+          ? openBranches
+          : [...openBranches, {
+              sessionId: branch.id,
+              sourceMessageId,
+              sourceLabel: `当前节点 · ${getPreviewPathLabel(previewSelection.filePath)}`,
+            }])
         return next
       })
       setSidePanelOpen(true)
-      setSidePanelTabMap((prev) => {
-        const next = new Map(prev)
-        next.set(sessionId, 'chat')
-        return next
-      })
+      setSidePanelTabMap((prev) => new Map(prev).set(sessionId, getExplorationSidePanelTab(branch.id)))
       window.getSelection()?.removeAllRanges()
       clearPreviewSelection()
+      toast.success('已从当前节点创建探索分支', { description: '文件选区已带入分支；结论可回到主线输入框。' })
     } catch (error) {
-      console.error('[DiffTabContent] 打开预览选区聊天标签失败:', error)
-      toast.error('打开聊天标签失败')
+      console.error('[DiffTabContent] 创建文件探索分支失败:', error)
+      toast.error('创建探索分支失败', { description: error instanceof Error ? error.message : undefined })
     } finally {
-      openSelectionChatPendingRef.current = false
+      openTemporaryAgentPendingRef.current = false
     }
-  }, [
-    clearPreviewSelection,
-    previewSelection,
-    selectedChatModel,
-    sessionId,
-    setConversationDrafts,
-    setConversations,
-    setQuotedSelectionMap,
-    setSideChatMap,
-    setSidePanelOpen,
-    setSidePanelTabMap,
-  ])
+  }, [agentSessions, clearPreviewSelection, previewSelection, sessionId, setAgentSessions, setQuotedSelectionMap, setSidePanelOpen, setSidePanelTabMap, setSideTemporaryAgentMap])
 
   // persistRef 始终持有最新 persistMarkdownDraft，供 setTimeout / unmount cleanup 调用。
   // 用 effect 而非渲染期赋值，避免 React 19 严格模式下并发渲染中途读到中间态。
@@ -1450,12 +1508,43 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filePath, fileAccess, isEditableText, markdownEditorCacheKey, readOnly, sessionId])
 
+  const previewTargetPath = getPreviewTargetPath(filePath, dirPath)
+  const handleOpenCurrentFolder = React.useCallback(() => {
+    window.electronAPI.systemOpenFile(getParentFolderPath(previewTargetPath), undefined, fileAccess).catch((error) => {
+      console.error('[DiffTabContent] 打开当前文件夹失败:', error)
+      toast.error('无法打开当前文件夹')
+    })
+  }, [fileAccess, previewTargetPath])
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-3 py-1.5 flex-shrink-0">
         <span className="min-w-0 flex-1 text-[12px] text-foreground/60 truncate" title={filePath}>
-          {filePath}
+          {getPreviewPathLabel(filePath)}
         </span>
+
+        {previewOnly && (
+          <>
+            <DefaultAppOpenButton
+              filePath={previewTargetPath}
+              access={fileAccess}
+              variant="labeled"
+            />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={handleOpenCurrentFolder}
+                  className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                  aria-label="打开当前文件夹"
+                >
+                  <FolderOpen className="size-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">打开当前文件夹</TooltipContent>
+            </Tooltip>
+          </>
+        )}
 
         {!previewOnly && (
           <div
@@ -1473,6 +1562,18 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
             <span className={cn('relative z-[1] rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors',
               viewMode === 'unified' ? 'text-foreground' : 'text-muted-foreground')}>统一</span>
           </div>
+        )}
+
+        {previewOnly && isHtml && (
+          <button
+            type="button"
+            onClick={() => setHtmlSourceMode((sourceMode) => !sourceMode)}
+            className="ml-auto p-1 rounded hover:bg-foreground/[0.06] text-foreground/40 hover:text-foreground/60 shrink-0"
+            title={htmlSourceMode ? '切换到渲染预览' : '切换到源码预览'}
+            aria-label={htmlSourceMode ? '切换到渲染预览' : '切换到源码预览'}
+          >
+            {htmlSourceMode ? <Eye className="size-3.5" /> : <Code2 className="size-3.5" />}
+          </button>
         )}
 
         {previewOnly && isEditableText && !readOnly && (
@@ -1543,7 +1644,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           className="p-1 rounded hover:bg-foreground/[0.06] text-foreground/40 hover:text-foreground/60 shrink-0"
           title="刷新文件内容（检测外部编辑器的修改）"
         >
-          <RefreshCw className="size-3.5" />
+          <RotateCw className="size-3.5" />
         </button>
 
         {canTogglePreviewWrap && (
@@ -1616,8 +1717,15 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
         <div ref={scrollContainerRef} onScroll={handleScroll} className="h-full flex-1 min-w-0 overflow-auto scrollbar-thin relative">
           {loading ? (
             <div className="flex items-center justify-center h-full text-muted-foreground text-[12px]">加载中...</div>
-          ) : previewOnly ? (
-            isPdf ? (
+          ) : (previewOnly || isOfficePreview) ? (
+            unsupportedPreviewReason ? (
+              <UnsupportedFilePreview
+                filePath={previewTargetPath}
+                access={fileAccess}
+                reason={unsupportedPreviewReason}
+                metadata={previewMetadata}
+              />
+            ) : isPdf ? (
               pdfSrc ? (
                 <div className="relative h-full">
                 <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 px-2 py-1 rounded-lg bg-background/80 backdrop-filter backdrop-blur-sm border border-border/30 shadow-sm">
@@ -1711,7 +1819,21 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                   dangerouslySetInnerHTML={{ __html: officeHtml }}
                 />
               ) : null
-            ) : isLegacyOffice ? null : isMarkdown ? (
+            ) : isLegacyOffice ? null : isHtml && !htmlSourceMode ? (
+              htmlPreviewUrl ? (
+                <iframe
+                  src={htmlPreviewUrl}
+                  className="h-full w-full border-0 bg-white"
+                  title={`${filePath.split('/').pop() || 'HTML'} 渲染预览`}
+                  sandbox="allow-scripts allow-forms"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-muted-foreground">
+                  无法加载 HTML 预览资源，请切换到源码预览或刷新后重试。
+                </div>
+              )
+            ) : isMarkdown ? (
               activeMarkdownEditing && markdownSourceMode ? (
                 <textarea
                   ref={sourceTextareaRef}
@@ -1740,6 +1862,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                   onChange={updateMarkdownDraft}
                   onSave={() => void saveMarkdownEdit()}
                   onCancel={exitMarkdownEdit}
+                  renderMermaidInEditor
                   disabled={markdownSaving || Boolean(readOnly)}
                   fileAccess={markdownFileAccess}
                   shikiTheme={theme === 'dark' ? 'github-dark' : 'github-light'}
@@ -1797,7 +1920,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
             x={previewSelection.x}
             y={previewSelection.y}
             onAddToAgent={handleAddSelectionToAgent}
-            onOpenChat={handleOpenSelectionChat}
+            onOpenExplorationBranch={handleOpenExplorationBranch}
           />
         )}
       </div>

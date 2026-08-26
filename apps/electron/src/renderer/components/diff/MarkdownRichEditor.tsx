@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
+import { DOMParser as ProseMirrorDOMParser } from '@tiptap/pm/model'
 import StarterKit from '@tiptap/starter-kit'
 import Underline from '@tiptap/extension-underline'
 import Link from '@tiptap/extension-link'
@@ -9,7 +10,12 @@ import { TextSelection } from '@tiptap/pm/state'
 import type { FileAccessOptions } from '@proma/shared'
 import type { MarkdownEditorSelection, MarkdownScrollPosition } from '@/lib/markdown-editor-state'
 import { cn } from '@/lib/utils'
-import { MARKDOWN_RENDERER_VERSION, markdownToHtml } from '@/lib/markdown-rich-text'
+import {
+  hasRichClipboardMarkup,
+  looksLikeMarkdownText,
+  MARKDOWN_RENDERER_VERSION,
+  markdownToHtml,
+} from '@/lib/markdown-rich-text'
 import {
   MathBlock,
   MathInline,
@@ -32,6 +38,8 @@ interface MarkdownRichEditorProps {
   onSave: () => void
   onCancel: () => void
   onRequestEdit?: () => void
+  /** 由外层源码编辑器接管 Mermaid 源码编辑时，富文本态持续显示图表预览。 */
+  renderMermaidInEditor?: boolean
   disabled?: boolean
   fileAccess?: FileAccessOptions
   shikiTheme?: string
@@ -48,6 +56,7 @@ export function MarkdownRichEditor({
   onSave,
   onCancel,
   onRequestEdit,
+  renderMermaidInEditor = false,
   disabled,
   fileAccess,
   shikiTheme = 'github-dark',
@@ -57,6 +66,7 @@ export function MarkdownRichEditor({
   onSelectionChange,
 }: MarkdownRichEditorProps): React.ReactElement {
   const isEditable = editing && !disabled
+  const showMermaidPreview = !isEditable || renderMermaidInEditor
   const markdownRendererVersion = MARKDOWN_RENDERER_VERSION
   const onChangeRef = React.useRef(onChange)
   const onSaveRef = React.useRef(onSave)
@@ -151,6 +161,23 @@ export function MarkdownRichEditor({
           return true
         }
         return false
+      },
+      handlePaste: (view, event) => {
+        if (!isEditableRef.current) return false
+
+        const plainText = event.clipboardData?.getData('text/plain') ?? ''
+        const clipboardHtml = event.clipboardData?.getData('text/html') ?? ''
+        if (!plainText || !looksLikeMarkdownText(plainText)) return false
+        // 复制已有富文本时优先保留剪贴板中的语义 HTML；普通 <p>/<div> 包装的
+        // Markdown 文本则继续按 Markdown 解析，避免把 **粗体** 当成字面量插入。
+        if (hasRichClipboardMarkup(clipboardHtml)) return false
+
+        const container = document.createElement('div')
+        container.innerHTML = markdownToHtml(plainText)
+        const slice = ProseMirrorDOMParser.fromSchema(view.state.schema).parseSlice(container)
+        event.preventDefault()
+        view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView().setMeta('uiEvent', 'paste'))
+        return true
       },
       handleDoubleClick: (_view, pos) => {
         if (isEditableRef.current || disabledRef.current || !onRequestEditRef.current) return false
@@ -334,9 +361,8 @@ export function MarkdownRichEditor({
         }}
         className={cn(
           editing ? 'min-h-0 flex-1 overflow-auto scrollbar-thin' : 'h-full min-h-full flex-1',
-          isEditable
-            ? '[&_.proma-mermaid-preview]:hidden [&_.proma-code-source-body]:block'
-            : [
+          showMermaidPreview
+            ? [
                 '[&_.proma-code-block--mermaid]:overflow-visible',
                 '[&_.proma-code-block--mermaid]:rounded-none',
                 '[&_.proma-code-block--mermaid]:border-0',
@@ -344,7 +370,8 @@ export function MarkdownRichEditor({
                 '[&_.proma-code-block--mermaid_.proma-code-header]:hidden',
                 '[&_.proma-code-block--mermaid_.proma-mermaid-preview]:block',
                 '[&_.proma-code-block--mermaid_.proma-code-source-body]:hidden',
-              ],
+              ]
+            : '[&_.proma-mermaid-preview]:hidden [&_.proma-code-source-body]:block',
         )}
       />
       {editing && editor && <TableBubbleMenu editor={editor} />}

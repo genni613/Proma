@@ -20,8 +20,11 @@ import {
   FolderSearch,
   GitBranch,
   Globe,
+  Code2,
   ImagePlus,
+  MousePointer2,
   Layers,
+  LoaderCircle,
   List,
   ListChecks,
   LogIn,
@@ -81,6 +84,29 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   ReadMcpResourceTool: Database,
   ListMcpResourcesTool: Server,
   SendMessage: Send,
+  BrowserObserve: Globe,
+  BrowserFind: Search,
+  BrowserNavigate: Globe,
+  BrowserWaitFor: LoaderCircle,
+  BrowserClick: Globe,
+  BrowserAct: MousePointer2,
+  BrowserFill: Globe,
+  BrowserPress: Globe,
+  BrowserHover: MousePointer2,
+  BrowserDrag: MousePointer2,
+  BrowserScroll: Globe,
+  BrowserExtract: FileText,
+  BrowserSelectOption: MousePointer2,
+  BrowserUpload: FilePenLine,
+  BrowserScreenshot: Globe,
+  BrowserListTabs: Globe,
+  BrowserNewTab: Globe,
+  BrowserSelectTab: Globe,
+  BrowserCloseTab: Globe,
+  BrowserClose: Globe,
+  BrowserPreviewOpen: Globe,
+  BrowserDomAction: MousePointer2,
+  BrowserExecuteJavaScript: Code2,
 }
 
 /**
@@ -134,6 +160,29 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   ReadMcpResourceTool: '读取 MCP 资源',
   ListMcpResourcesTool: '列出 MCP 资源',
   SendMessage: '发送消息',
+  BrowserObserve: '查看受管浏览器',
+  BrowserFind: '语义定位网页元素',
+  BrowserNavigate: '打开网页',
+  BrowserWaitFor: '等待网页状态',
+  BrowserClick: '点击网页元素',
+  BrowserAct: '点击并等待网页状态',
+  BrowserFill: '填写网页字段',
+  BrowserPress: '按下浏览器按键',
+  BrowserHover: '悬停网页元素',
+  BrowserDrag: '拖拽网页元素',
+  BrowserScroll: '滚动网页或容器',
+  BrowserExtract: '抽取网页内容',
+  BrowserSelectOption: '选择下拉选项',
+  BrowserUpload: '选择网页上传文件',
+  BrowserScreenshot: '截取网页',
+  BrowserListTabs: '列出浏览器标签',
+  BrowserNewTab: '新建浏览器标签',
+  BrowserSelectTab: '切换浏览器标签',
+  BrowserCloseTab: '关闭浏览器标签',
+  BrowserClose: '关闭受管浏览器',
+  BrowserPreviewOpen: '打开本地网页预览',
+  BrowserDomAction: '操作网页 DOM',
+  BrowserExecuteJavaScript: '执行网页 JavaScript',
 }
 
 /**
@@ -198,6 +247,43 @@ export function getInputSummary(
         return query.length > 60 ? query.slice(0, 60) + '…' : query
       }
       return null
+    }
+
+    case 'BrowserNavigate': {
+      const url = input.url
+      if (typeof url !== 'string') return null
+      try { return new URL(url).host } catch { return url.slice(0, 60) }
+    }
+
+    case 'BrowserClick':
+    case 'BrowserAct':
+    case 'BrowserFill':
+    case 'BrowserHover':
+    case 'BrowserUpload': {
+      return typeof input.ref === 'string' ? input.ref : null
+    }
+
+    case 'BrowserDrag': {
+      return typeof input.sourceRef === 'string' && typeof input.targetRef === 'string'
+        ? `${input.sourceRef} → ${input.targetRef}`
+        : null
+    }
+
+    case 'BrowserFind': {
+      return typeof input.name === 'string' ? input.name : typeof input.role === 'string' ? input.role : null
+    }
+
+    case 'BrowserScroll': {
+      return typeof input.selector === 'string' ? input.selector : typeof input.position === 'string' ? input.position : typeof input.deltaY === 'number' ? `${input.deltaY}px` : null
+    }
+
+    case 'BrowserExtract':
+    case 'BrowserSelectOption': {
+      return typeof input.selector === 'string' ? input.selector : null
+    }
+
+    case 'BrowserPress': {
+      return typeof input.key === 'string' ? input.key : null
     }
 
     case 'Skill': {

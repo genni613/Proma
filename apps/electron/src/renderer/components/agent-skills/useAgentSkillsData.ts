@@ -2,8 +2,9 @@
  * useAgentSkillsData — Agent 技能视图的数据层
  *
  * 封装当前工作区 Skills / MCP 的加载与增删改逻辑（IPC 调用），
- * 供「Agent 技能」全屏视图复用。所有写操作后会 bump
- * workspaceCapabilitiesVersionAtom，通知侧边栏等订阅方刷新。
+ * 供「Agent 技能」全屏视图复用。当前 Skills 页面挂载期间固定初始快照，
+ * 避免文件监听导致的重排和整页跳动；开关仅更新对应卡片的 enabled 字段。
+ * 离开后下次进入或切换工作区时再重新读取完整能力列表。
  */
 
 import * as React from 'react'
@@ -32,18 +33,22 @@ export interface AgentSkillsData {
   toggleSkill: (slug: string, enabled: boolean) => Promise<void>
   deleteSkill: (slug: string, name: string) => Promise<boolean>
   updateSkill: (slug: string) => Promise<void>
+  refreshMcpConfig: () => Promise<void>
   toggleMcp: (name: string, enabled: boolean) => Promise<void>
   toggleBuiltinMcp: (id: string, enabled: boolean) => Promise<void>
   deleteMcp: (name: string) => Promise<void>
 }
 
-export function useAgentSkillsData(): AgentSkillsData {
+/**
+ * workspaceId 指定时用于右侧 Component Workspace：数据归属必须锁定到宿主 Agent
+ * 会话的项目，不能跟随全局项目选择器切换。
+ */
+export function useAgentSkillsData(workspaceId?: string): AgentSkillsData {
   const workspaces = useAtomValue(agentWorkspacesAtom)
-  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
+  const selectedWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const bumpCapabilitiesVersion = useSetAtom(workspaceCapabilitiesVersionAtom)
-  const capabilitiesVersion = useAtomValue(workspaceCapabilitiesVersionAtom)
 
-  const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId)
+  const currentWorkspace = workspaces.find((w) => w.id === (workspaceId ?? selectedWorkspaceId))
   const workspaceSlug = currentWorkspace?.slug ?? ''
 
   const [loading, setLoading] = React.useState(true)
@@ -85,22 +90,22 @@ export function useAgentSkillsData(): AgentSkillsData {
     }
   }, [workspaceSlug])
 
-  // workspaceSlug 或外部能力版本变化时重新拉取
+  // 只在进入页面或切换工作区时读取。文件监听会在切换开关后异步推送能力变化，
+  // 这里刻意不订阅 capabilitiesVersion，防止扫描 active/inactive 目录后重排当前列表。
   React.useEffect(() => {
     setLoading(true)
     void loadData()
-  }, [loadData, capabilitiesVersion])
+  }, [loadData])
 
   const toggleSkill = React.useCallback(async (slug: string, enabled: boolean) => {
     try {
       await window.electronAPI.toggleWorkspaceSkill(workspaceSlug, slug, enabled)
       setSkills((prev) => prev.map((s) => (s.slug === slug ? { ...s, enabled } : s)))
-      bumpCapabilitiesVersion((v) => v + 1)
     } catch (error) {
       console.error('[Agent 技能] 切换 Skill 状态失败:', error)
       toast.error('切换 Skill 状态失败')
     }
-  }, [workspaceSlug, bumpCapabilitiesVersion])
+  }, [workspaceSlug])
 
   const deleteSkill = React.useCallback(async (slug: string, name: string): Promise<boolean> => {
     try {
@@ -132,6 +137,16 @@ export function useAgentSkillsData(): AgentSkillsData {
       setUpdatingSkill(null)
     }
   }, [workspaceSlug, updatingSkill, bumpCapabilitiesVersion])
+
+  const refreshMcpConfig = React.useCallback(async () => {
+    if (!workspaceSlug) return
+    try {
+      const config = await window.electronAPI.getWorkspaceMcpConfig(workspaceSlug)
+      setMcpConfig(config)
+    } catch (error) {
+      console.error('[Agent 技能] 刷新 MCP 配置失败:', error)
+    }
+  }, [workspaceSlug])
 
   const toggleMcp = React.useCallback(async (name: string, enabled: boolean) => {
     try {
@@ -194,6 +209,7 @@ export function useAgentSkillsData(): AgentSkillsData {
     toggleSkill,
     deleteSkill,
     updateSkill,
+    refreshMcpConfig,
     toggleMcp,
     toggleBuiltinMcp,
     deleteMcp,

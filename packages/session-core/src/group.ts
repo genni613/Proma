@@ -66,6 +66,8 @@ export interface AssistantTurn {
   assistantMessages: SDKAssistantMessage[]
   /** 当前 turn 内所有消息（含 tool_result user 消息，供工具结果查找） */
   turnMessages: SDKMessage[]
+  /** The human input that started this assistant turn, when one exists. */
+  inputMessage?: SDKUserMessage
   /** 模型名称（取首条 assistant 消息的 model） */
   model?: string
   /** 创建时间（取首条 assistant 消息的时间） */
@@ -95,12 +97,17 @@ export type MessageGroup =
  * 1. user（真正用户输入）→ 单独的 user group
  * 2. assistant + user(tool_result) + assistant... → 合并为一个 assistant-turn
  * 3. system（压缩状态 / permission_denied）→ 独立渲染，其他归入当前 turn
- * 4. 其他类型（result, tool_progress 等）→ 归入当前 assistant-turn
+ * 4. 其他类型（result, tool_progress 等）→ 归入当前 assistant-turn；被 system 状态分隔的 terminal result 回挂到刚关闭的 turn
  * 5. 后处理：合并相邻同模型的 assistant-turn（处理子代理切换模型导致的碎片化）
  */
 export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string): MessageGroup[] {
   const groups: MessageGroup[] = []
   let currentTurn: AssistantTurn | null = null
+  // 自动压缩会在最终 assistant 消息与 terminal result 之间插入可持久化的 system 状态。
+  // system 状态会关闭当前 turn；保留该引用，才能把随后到达的 result（包含耗时/usage）
+  // 仍归属到刚完成的回答，而不是让 renderer 丢失 DurationBadge 的数据来源。
+  const trailingResultTarget: { turn: AssistantTurn | null } = { turn: null }
+  let pendingInputMessage: SDKUserMessage | undefined
   // 收到后台任务完成通知（task_notification）后，若没有用户输入就直接出现新的 assistant 输出，
   // 说明这是自动唤醒的新一轮，应另起独立消息块，而不是续接上一轮。
   // 注意：不能用 result 做信号——正常对话每轮也以 result 结束，会误伤普通回复。
@@ -109,6 +116,7 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
   const flushTurn = (): void => {
     if (currentTurn && currentTurn.assistantMessages.length > 0) {
       groups.push(currentTurn)
+      trailingResultTarget.turn = currentTurn
     }
     currentTurn = null
   }
@@ -120,7 +128,9 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
         // 真正的用户输入 → 结束当前 turn，开始新段落
         flushTurn()
         groups.push({ type: 'user', message: userMsg })
+        pendingInputMessage = userMsg
         pendingWakeBoundary = false
+        trailingResultTarget.turn = null
       } else {
         // tool_result 消息 → 归入当前 turn
         if (currentTurn) {
@@ -139,6 +149,7 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
           type: 'assistant-turn',
           assistantMessages: [aMsg],
           turnMessages: [msg],
+          inputMessage: pendingInputMessage,
           model: aMsg._channelModelId || aMsg.message?.model || sessionModelId,
           createdAt: meta.createdAt,
           // 紧跟在后台任务唤醒之后的新 turn：阻断与上一轮的合并
@@ -183,6 +194,7 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
           currentTurn.turnMessages.push(msg)
         } else {
           pendingWakeBoundary = true
+          pendingInputMessage = undefined
         }
       } else if (currentTurn) {
         currentTurn.turnMessages.push(msg)
@@ -195,7 +207,10 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
       }
       if (currentTurn) {
         currentTurn.turnMessages.push(msg)
+      } else if (msg.type === 'result' && trailingResultTarget.turn) {
+        trailingResultTarget.turn.turnMessages.push(msg)
       }
+      if (msg.type === 'result') trailingResultTarget.turn = null
     }
   }
 
@@ -246,6 +261,7 @@ function mergeAdjacentSameModelTurns(groups: MessageGroup[]): MessageGroup[] {
       const target = result[mergeTargetIdx] as AssistantTurn
       target.assistantMessages.push(...group.assistantMessages)
       target.turnMessages.push(...group.turnMessages)
+      target.inputMessage ??= group.inputMessage
     } else {
       result.push(group)
     }

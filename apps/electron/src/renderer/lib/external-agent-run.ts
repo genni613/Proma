@@ -41,6 +41,17 @@ export function shouldActivateExternalAgentRun(
   return true
 }
 
+/**
+ * 自动派生的协作子会话只能在其父会话正处于用户前台视图时展开。
+ * 后台父会话的事件仍会更新运行状态和侧栏树，但绝不能改变用户当前焦点。
+ */
+export function shouldRevealDelegatedSession(
+  parentSessionId: string,
+  activeSessionId: string | null,
+): boolean {
+  return parentSessionId === activeSessionId
+}
+
 export function buildExternalAgentRunActivation(
   input: ExternalAgentRunActivationInput,
 ): ExternalAgentRunActivation {
@@ -57,13 +68,11 @@ export function buildExternalAgentRunActivation(
     tabs,
     activeTabId,
     title,
-    workspaceId: input.workspaceId ?? session?.workspaceId,
+    workspaceId: session?.workspaceId ?? input.workspaceId,
     modelId: input.modelId,
     streamState: {
       ...input.currentStreamState,
       running: true,
-      content: input.currentStreamState?.content ?? '',
-      toolActivities: input.currentStreamState?.toolActivities ?? [],
       model: input.modelId ?? input.currentStreamState?.model,
       startedAt: input.startedAt,
     },

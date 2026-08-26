@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it'
+import { normalizeMalformedStrongDelimiters } from './markdown-emphasis'
 
 const VIDEO_EXT_RE = /\.(mp4|webm|ogg|ogv|mov|m4v)(?:[?#].*)?$/i
 const PREVIEW_BLOCK_RE = /^<div\s+[^>]*data-type=(["'])(?:raw-html-block|math-block)\1/i
@@ -6,7 +7,7 @@ const DETAILS_BLOCK_RE = /<details(\s[^>]*)?>\s*<summary>([\s\S]*?)<\/summary>([
 const STANDALONE_HTML_MEDIA_RE = /^\s*<(?:img|video)\b[^>]*(?:\/?>|>.*?<\/video>)\s*$/i
 const LEADING_FRONTMATTER_RE = /^(?:\ufeff)?---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?=\r?\n|$)/
 
-export const MARKDOWN_RENDERER_VERSION = 4
+export const MARKDOWN_RENDERER_VERSION = 5
 
 const EMOJI_SHORTCODES: Record<string, string> = {
   '+1': '👍',
@@ -328,11 +329,23 @@ function normalizeMarkdownLinePrefixes(markdown: string): string {
     .replace(/^\u00a0{1,3}(?=#{1,6}\s)/gm, (spaces) => ' '.repeat(spaces.length))
 }
 
+/** 判断剪贴板纯文本是否包含足够明确的 Markdown 语法。 */
+export function looksLikeMarkdownText(value: string): boolean {
+  return /(?:^|\n)\s{0,3}(?:#{1,6}\s|[-+*]\s|>\s|```|~~~|\d+[.)]\s|---\s*$)|(?:\*\*|__|~~|`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)|\|[^|\n]+\|)|(?:^|\s)(?:\*[^*\n]+\*|_[^_\n]+_)/m.test(value)
+}
+
+/** 判断剪贴板 HTML 是否已经携带可直接交给 TipTap 的富文本语义。 */
+export function hasRichClipboardMarkup(value: string): boolean {
+  return /<(?:strong|b|em|i|u|s|del|h[1-6]|ul|ol|li|blockquote|pre|code|hr|table|thead|tbody|tr|th|td|a|img|video)\b/i.test(value)
+}
+
 function preprocessMarkdown(markdown: string): string {
   return splitMarkdownCodeRegions(wrapLeadingFrontmatterBlock(markdown))
     .map((chunk) => chunk.code
       ? chunk.text
-      : wrapMarkdownDetailsBlocks(separateStandaloneHtmlMediaBlocks(normalizeMarkdownLinePrefixes(chunk.text))))
+      : wrapMarkdownDetailsBlocks(separateStandaloneHtmlMediaBlocks(
+        normalizeMarkdownLinePrefixes(normalizeMalformedStrongDelimiters(chunk.text))
+      )))
     .join('')
 }
 
@@ -380,6 +393,11 @@ export function markdownToHtml(markdown: string): string {
 
 function serializeNamedMention(prefix: '&session' | '&todo' | '&calendar_event', id: string, label: string | null): string {
   return label ? `${prefix}:${id}::${encodeURIComponent(label)}` : `${prefix}:${id}`
+}
+
+function addMentionBoundary(serialized: string, element: HTMLElement): string {
+  const nextText = element.nextSibling?.textContent ?? ''
+  return nextText.length > 0 && !/^\s/u.test(nextText) ? `${serialized} ` : serialized
 }
 
 /** 将 TipTap 输出的 HTML 转换为 Markdown 格式 */
@@ -529,15 +547,22 @@ export function htmlToMarkdown(
         const dataLabel = el.getAttribute('data-label')
         const suggestionChar = el.getAttribute('data-mention-suggestion-char') || '@'
         const referenceType = el.getAttribute('data-mention-reference-type')
+        const agentHistoryQuote = el.getAttribute('data-mention-quote')
         if (dataType === 'mention') {
-          if (referenceType === 'todo') return serializeNamedMention('&todo', dataId, dataLabel)
-          if (referenceType === 'calendar_event') return serializeNamedMention('&calendar_event', dataId, dataLabel)
-          if (suggestionChar === '/') return `/skill:${dataId}`
-          if (suggestionChar === '#') return `#mcp:${dataId}`
-          if (suggestionChar === '&') return serializeNamedMention('&session', dataId, dataLabel)
-          // 路径可能包含空格等字符，必须编码后再嵌入 @file: 协议，
-          // 否则展示层 @file:(\S+) 正则会在空格处截断（remarkMentions / MentionChip / 排队消息均内置解码）。
-          return `@file:${encodeURIComponent(dataId)}`
+          let serializedMention: string
+          if (agentHistoryQuote) serializedMention = `&quote:${agentHistoryQuote}`
+          else if (referenceType === 'todo') serializedMention = serializeNamedMention('&todo', dataId, dataLabel)
+          else if (referenceType === 'calendar_event') serializedMention = serializeNamedMention('&calendar_event', dataId, dataLabel)
+          else if (suggestionChar === '/') serializedMention = `/skill:${dataId}`
+          else if (suggestionChar === '#') serializedMention = `#mcp:${dataId}`
+          else if (suggestionChar === '&') serializedMention = serializeNamedMention('&session', dataId, dataLabel)
+          else {
+            // 路径可能包含空格等字符，必须编码后再嵌入 @file: 协议；
+            // 展示层和排队消息解析器会在显式空格或紧邻的 CJK 文本处结束 token；
+            // 序列化层会为未分隔的后续文本补充空格，避免 ASCII 后缀被吞进 chip。
+            serializedMention = `@file:${encodeURIComponent(dataId)}`
+          }
+          return addMentionBoundary(serializedMention, el)
         }
         return children
       }

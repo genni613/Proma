@@ -63,6 +63,15 @@ function isSameLocalDay(a: number, b: number): boolean {
   )
 }
 
+function formatWeekdays(days?: number[]): string {
+  const normalized = [...new Set(days ?? [])].sort((a, b) => a - b)
+  if (normalized.length === 0) return '每天'
+  if (normalized.join(',') === '1,2,3,4,5') return '工作日'
+  if (normalized.join(',') === '0,6') return '周末'
+  const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+  return normalized.map((day) => names[day] ?? '').join('、')
+}
+
 function formatScheduleLabel(a: Automation): string {
   if (a.scheduleType === 'once') {
     const when = a.scheduledAt
@@ -79,9 +88,10 @@ function formatScheduleLabel(a: Automation): string {
   }
   if (a.scheduleType === 'monthly') return `每月 ${a.dayOfMonth ?? 1} 号 ${a.timeOfDay ?? '09:00'}`
   const min = a.intervalMinutes
-  if (min < 60) return `每 ${min} 分钟`
-  if (min < 1440) return `每 ${min / 60} 小时`
-  return `每 ${min / 1440} 天`
+  const intervalLabel = min < 60 ? `每 ${min} 分钟` : min < 1440 ? `每 ${min / 60} 小时` : `每 ${min / 1440} 天`
+  const weekdayLabel = a.activeWeekdays && a.activeWeekdays.length > 0 ? `，${formatWeekdays(a.activeWeekdays)}` : ''
+  const windowLabel = a.activeWindowStart && a.activeWindowEnd ? `，${a.activeWindowStart}–${a.activeWindowEnd}` : ''
+  return `${intervalLabel}${weekdayLabel}${windowLabel}`
 }
 
 let tickTimer: NodeJS.Timeout | undefined
@@ -133,7 +143,9 @@ export async function runAutomation(automation: Automation, manual = false): Pro
       console.log(`[定时任务] ${automation.name} 上次会话已被用户接管，本次自动开新会话`)
     }
     if (automation.lastSessionId && lastSessionMeta && !lastSessionMeta.automationGraduated) {
-      if (sessionMode === 'reuse') {
+      if (lastSessionMeta.workspaceId !== automation.workspaceId) {
+        console.warn(`[定时任务] ${automation.name} 上次会话项目已变化，本次自动开新会话`)
+      } else if (sessionMode === 'reuse') {
         reuseSessionId = automation.lastSessionId
       } else if (
         sessionMode === 'daily' &&

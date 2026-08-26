@@ -14,7 +14,7 @@ import { getChannelById, resolveChannelRuntimeApiKey } from './channel-manager'
 import { getSettings } from './settings-service'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
-import { resolvePiImageInputCapability } from './adapters/pi-model-registry'
+import { resolvePiVisionRelayRoute } from './adapters/pi-model-registry'
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_RESULT_CHARS = 12_000
@@ -157,7 +157,8 @@ function parseVisionResult(content: string, filename: string): VisionRelayResult
 }
 
 export function isVisionRelayEligibleForModel(modelId: string | undefined): boolean {
-  return /^deepseek-v4-(?:pro|flash)$/i.test(modelId?.trim() ?? '')
+  // Flash 与 Flash Vision Exp 已支持原生视觉；仅 Pro 仍需经独立视觉模型转发。
+  return /^deepseek-v4-pro$/i.test(modelId?.trim() ?? '')
 }
 
 export function isVisionRelayConfigured(): boolean {
@@ -187,15 +188,15 @@ export async function inspectImageWithVisionRelay(input: InspectImageInput): Pro
     return failure('VISION_ROUTE_UNAVAILABLE', '配置的视觉渠道或模型已不可用，请重新配置视觉助手。')
   }
 
-  try {
-    getAdapter(channel.provider)
-  } catch {
-    return failure('VISION_ROUTE_UNAVAILABLE', '所选渠道不支持视觉助手请求，请选择 API 渠道而非订阅登录渠道。')
+  const route = await resolvePiVisionRelayRoute(channel.provider, configured.modelId)
+  if (!route) {
+    return failure('VISION_ROUTE_UNAVAILABLE', '所选模型未被确认支持图片输入或协议路由，请选择一个已知的视觉模型。')
   }
 
-  const capability = await resolvePiImageInputCapability(channel.provider, configured.modelId)
-  if (capability !== 'supported') {
-    return failure('VISION_ROUTE_UNAVAILABLE', '所选模型未被确认支持图片输入，请选择一个已知的视觉模型。')
+  try {
+    getAdapter(route.adapterProvider)
+  } catch {
+    return failure('VISION_ROUTE_UNAVAILABLE', '所选渠道不支持视觉助手请求，请选择 API 渠道而非订阅登录渠道。')
   }
 
   let apiKey: string
@@ -217,9 +218,9 @@ export async function inspectImageWithVisionRelay(input: InspectImageInput): Pro
       mediaType: image.mediaType,
       data: image.data.toString('base64'),
     }]
-    const adapter = getAdapter(channel.provider)
+    const adapter = getAdapter(route.adapterProvider)
     const request = adapter.buildStreamRequest({
-      baseUrl: channel.baseUrl,
+      baseUrl: route.baseUrl ?? channel.baseUrl,
       apiKey,
       modelId: configured.modelId,
       history: [],

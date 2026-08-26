@@ -21,6 +21,10 @@ export interface PreviewFile {
   readOnly?: boolean
   /** 候选基础目录（用于相对路径解析） */
   basePaths?: string[]
+  /** Workspace slug for a relocatable managed Skill path. */
+  workspaceSkillSlug?: string
+  /** Original absolute Skill entry path used only when the managed locator cannot resolve. */
+  legacySkillFilePath?: string
   /** 文件是否落在当前会话的 diff scope 内（与 getUnstagedChanges 的 candidates 对齐） */
   inDiffScope?: boolean
   /** 基准 ref（如 "origin/main"），用于 worktree vs main 模式的 diff 对比 */
@@ -29,29 +33,22 @@ export interface PreviewFile {
 
 // ===== Atoms =====
 
+/** 预览 Tab 的稳定 key：同一文件在不同预览/比较上下文可独立打开。 */
+export function getPreviewFileId(file: PreviewFile): string {
+  return [file.filePath, file.previewOnly ? 'preview' : 'diff', file.gitRoot ?? '', file.baseRef ?? ''].join('\u0000')
+}
+
 /** 每会话预览面板开关 */
 export const previewPanelOpenMapAtom = atom<Map<string, boolean>>(new Map())
 
-/** 每会话当前预览的文件（null 时显示 DiffChangesList） */
+/** 每会话已打开的预览文件；非激活项只保留轻量元数据。 */
+export const previewFilesMapAtom = atom<Map<string, PreviewFile[]>>(new Map())
+
+/** 每会话当前预览的文件（兼容旧调用方的激活文件投影）。 */
 export const previewFileMapAtom = atom<Map<string, PreviewFile | null>>(new Map())
 
 /** 分栏比例（对话占比），持久化 */
 export const previewSplitRatioAtom = atomWithStorage<number>('proma-preview-split-ratio', 0.5, undefined, { getOnInit: true })
-
-/**
- * 预览默认展开方式，持久化。
- * - 'tab'   = 以预览标签页形式打开（旧版默认）
- * - 'split' = 在主区域右侧分屏展开（可同时看到 Agent 输出与文件内容）
- *
- * 用户仍可通过拖拽 Tab 出区域、PreviewPanel 顶栏按钮等即时切换。
- */
-export type PreviewModePreference = 'tab' | 'split'
-export const previewModePreferenceAtom = atomWithStorage<PreviewModePreference>(
-  'proma-preview-mode-pref',
-  'tab',
-  undefined,
-  { getOnInit: true },
-)
 
 /** 代码预览换行偏好（默认不换行，保持现有横向滚动行为） */
 export const previewCodeWrapAtom = atomWithStorage<boolean>(
@@ -91,6 +88,12 @@ export interface QuotedSelection {
   startLine?: number
   /** 结束行号（1-based） */
   endLine?: number
+  /** Agent 历史消息内选区的起始字符偏移（0-based） */
+  selectionStart?: number
+  /** Agent 历史消息内选区的结束字符偏移（0-based、exclusive） */
+  selectionEnd?: number
+  /** Agent 历史中的所属轮次（1-based；用户消息和对应回复共用同一轮） */
+  turn?: number
   /** 捕获时间戳 */
   capturedAt: number
 }

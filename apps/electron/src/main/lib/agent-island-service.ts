@@ -13,9 +13,7 @@
  * 本服务只负责 Agent 会话状态，保持职责单一。
  */
 
-import { ipcMain } from 'electron'
 import {
-  AGENT_ISLAND_IPC_CHANNELS,
   type AgentIslandActivityLine,
   type AgentIslandPillSnapshot,
   type AgentIslandSessionSnapshot,
@@ -33,6 +31,8 @@ import { getAgentIslandTodoAttentionKeys, selectAgentIslandTodos } from './agent
 import { selectAgentIslandCompactPlanQuota } from './agent-island-plan-quota'
 import { getAgentIslandPhasePriority } from './agent-island-priority'
 import { buildVisibilityKey } from './agent-island-visibility'
+import { shouldRetainAgentIslandSession } from './agent-island-session-visibility'
+import { getWindowsAgentIslandSurface } from './windows-agent-island-surface'
 import { listCalendarEvents, listTodos } from './planning-manager'
 import { onPlanningChanged } from './planning-events'
 import { getChannelPlanQuota, listChannels } from './channel-manager'
@@ -163,8 +163,10 @@ function setToolDetail(session: InternalSessionSnapshot, toolName: string): void
 function handleAgentEvent(sessionId: string, payload: AgentStreamPayload): void {
   if (payload.kind === 'proma_event') {
     handlePromaEvent(sessionId, payload.event)
-  } else {
+  } else if (payload.kind === 'sdk_message') {
     handleSdkMessage(sessionId, payload.message)
+  } else {
+    // Delta 仅用于 renderer 的实时内容；灵动岛等待终态 SDK message 更新。
   }
 }
 
@@ -428,13 +430,9 @@ function isIslandSession(session: InternalSessionSnapshot, now: number): boolean
   // 委派子会话只在需要用户交互时露出；执行和结束均由父会话收敛。
   if (isDelegatedChildSession(session.sessionId)) return session.phase === 'needs-interaction'
   // Running is deliberately visible: the island is also a live execution pulse,
-  // not only a handoff/error inbox. Terminal sessions retain their existing
-  // unread window to avoid becoming permanent history.
-  if (session.phase === 'running' || session.phase === 'needs-interaction' || session.phase === 'error') return true
-  return session.phase === 'completed'
-    && session.unread
-    && session.terminalAt !== undefined
-    && now - session.terminalAt < UNREAD_RETAIN_MS
+  // not only a handoff/error inbox. Viewed errors leave the Island immediately,
+  // while completed sessions retain their unread window to avoid permanent history.
+  return shouldRetainAgentIslandSession(session, now, UNREAD_RETAIN_MS)
 }
 
 function attentionScore(session: InternalSessionSnapshot): number {
@@ -636,9 +634,19 @@ function pushState(): void {
   if (json === lastStateJson) return
   lastStateJson = json
 
-  // macOS 原生 helper 是唯一的 Island surface；helper 不可用时直接停止投影。
-  if (!isMacAgentIslandNativeHostReady()) return
-  publishMacAgentIslandSnapshot(buildNativeSnapshot(state, planning))
+  const snapshot = buildNativeSnapshot(state, planning)
+
+  if (isMacAgentIslandNativeHostReady()) {
+    publishMacAgentIslandSnapshot(snapshot)
+  }
+
+  if (process.platform === 'win32') {
+    publishWindowsAgentIslandSnapshot(snapshot)
+  }
+}
+
+function publishWindowsAgentIslandSnapshot(snapshot: NativeAgentIslandSnapshot): void {
+  getWindowsAgentIslandSurface().onSnapshot(snapshot)
 }
 
 /**
@@ -755,6 +763,7 @@ function requiresImmediateAgentIslandPush(payload: AgentStreamPayload): boolean 
   if (payload.kind === 'proma_event') {
     return ['permission_request', 'ask_user_request', 'exit_plan_mode_request', 'run_stopped'].includes(payload.event.type)
   }
+  if (payload.kind !== 'sdk_message') return false
   const message = payload.message
   return message.type === 'result' || (message.type === 'assistant' && Boolean((message as import('@proma/shared').SDKAssistantMessage).error))
 }
@@ -768,8 +777,6 @@ export interface AgentIslandServiceDeps {
   showAndFocusMainWindow: () => void
   /** 打开指定 Agent 会话（转发到主窗口渲染进程） */
   openAgentSession: (sessionId: string, title: string) => void
-  /** 打开独立 Planning 窗口（原生岛的日程入口）。 */
-  openPlanning?: () => void
   /** 是否允许启用灵动岛（如设置开关） */
   enabled?: () => boolean
 }
@@ -794,25 +801,20 @@ export function initAgentIslandService(deps: AgentIslandServiceDeps): void {
 
   // 订阅 Agent 事件流
   disposeEventBus = agentEventBus.on((sessionId, payload) => {
-    if (deps.enabled?.() === false) return
     handleAgentEvent(sessionId, payload)
     schedulePush(requiresImmediateAgentIslandPush(payload) ? PUSH_THROTTLE_MS : AGENT_STREAM_PUSH_THROTTLE_MS)
-  })
-
-  // 仅保留主应用用于确认“完成会话已查看”的 IPC。
-  ipcMain.handle(AGENT_ISLAND_IPC_CHANNELS.MARK_SESSION_VIEWED, (_event, sessionId: unknown) => {
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return
-    markAgentIslandSessionViewed(sessionId)
   })
 }
 
 /**
- * 完成态的未读由主进程管理；主应用确认用户已经看过结果后，在此统一清除。
- * 错误和需要交互的会话必须保留 attention，不能被普通查看动作吞掉。
+ * 完成和异常态的未读由主进程管理；主应用确认用户已经看过后，在此统一清除。
+ * 待接手会话仍保持 attention，直到用户实际完成权限确认、回答或计划审批。
  */
-function markAgentIslandSessionViewed(sessionId: string): void {
+export function markAgentIslandSessionViewed(sessionId: string): void {
   const session = sessions.get(sessionId)
-  if (session?.phase !== 'completed' || !session.unread) return
+  if (!session || (session.phase !== 'completed' && session.phase !== 'error')) return
+  if (session.phase === 'completed' && !session.unread) return
+  if (!session.attention && !session.unread) return
   session.unread = false
   session.attention = false
   schedulePush()
@@ -911,12 +913,6 @@ export function handleNativeAgentIslandEvent(event: NativeAgentIslandEvent): voi
       break
     case 'open-session':
       openAgentIslandSession(event.sessionId)
-      break
-    case 'open-planning':
-      // Native islands prefer the focused Planning window, while deployments
-      // without that optional surface still retain a useful main-window route.
-      if (serviceDeps.openPlanning) serviceDeps.openPlanning()
-      else serviceDeps.showAndFocusMainWindow()
       break
     case 'dismiss':
       dismissAgentIsland()

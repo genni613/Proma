@@ -1,11 +1,26 @@
 import { describe, expect, test } from 'bun:test'
-import { applyAgentEvent, clearAgentStreamError, isRetryEventForCurrentStream, type AgentStreamState } from './agent-atoms'
+import { createStore } from 'jotai/vanilla'
+import {
+  agentSessionInputStreamStateAtomFamily,
+  agentSessionStreamingStateAtomFamily,
+  agentStreamingStatesAtom,
+  applyAgentEvent,
+  clearAgentStreamError,
+  getDelegationTabLabel,
+  isRetryEventForCurrentStream,
+  isWorkspaceComponentTab,
+  sanitizeWorkspaceComponentTabs,
+  agentSessionComponentTabsAtomFamily,
+  agentDiffPanelTabAtom,
+  agentSidePanelOpenAtomFamily,
+  revealChangedWorkspaceComponentAtom,
+  skillDetailNavigationAtomFamily,
+  type AgentStreamState,
+} from './agent-atoms'
 
 function createStreamState(overrides: Partial<AgentStreamState> = {}): AgentStreamState {
   return {
     running: true,
-    content: '',
-    toolActivities: [],
     inputTokens: 180_000,
     outputTokens: 2_000,
     cacheReadTokens: 160_000,
@@ -14,6 +29,56 @@ function createStreamState(overrides: Partial<AgentStreamState> = {}): AgentStre
     ...overrides,
   }
 }
+
+describe('右侧工作区组件', () => {
+  test('工作区组件 Tab 按 session 隔离，不会影响同一 workspace 的其他会话', () => {
+    const store = createStore()
+    const sourceSessionTabs = agentSessionComponentTabsAtomFamily('session-a')
+
+    store.set(sourceSessionTabs, ['skills', 'memory'])
+
+    expect(store.get(sourceSessionTabs)).toEqual(['skills', 'memory'])
+    expect(store.get(agentSessionComponentTabsAtomFamily('session-b'))).toEqual([])
+  })
+
+  test('Agent 变更只打开来源 session 的对应 Tab', () => {
+    const store = createStore()
+
+    store.set(revealChangedWorkspaceComponentAtom, { sessionId: 'source-session', component: 'memory' })
+
+    expect(store.get(agentSessionComponentTabsAtomFamily('source-session'))).toEqual(['memory'])
+    expect(store.get(agentSessionComponentTabsAtomFamily('other-session'))).toEqual([])
+    expect(store.get(agentSidePanelOpenAtomFamily('source-session'))).toBe(true)
+    expect(store.get(agentDiffPanelTabAtom).get('source-session')).toBe('memory')
+    expect(store.get(agentDiffPanelTabAtom).get('other-session')).toBeUndefined()
+  })
+
+  test('Skill 历史引用导航状态按会话隔离', () => {
+    const store = createStore()
+
+    store.set(skillDetailNavigationAtomFamily('session-a'), { skillSlug: 'skill-a', workspaceSlug: 'workspace-a' })
+
+    expect(store.get(skillDetailNavigationAtomFamily('session-a'))).toEqual({ skillSlug: 'skill-a', workspaceSlug: 'workspace-a' })
+    expect(store.get(skillDetailNavigationAtomFamily('session-b'))).toBeNull()
+  })
+
+  test('只接受已注册的项目级组件类型', () => {
+    expect(isWorkspaceComponentTab('todos')).toBe(true)
+    expect(isWorkspaceComponentTab('memory')).toBe(true)
+    expect(isWorkspaceComponentTab('browser:tab-1')).toBe(false)
+    expect(isWorkspaceComponentTab('files')).toBe(false)
+  })
+
+  test('过滤旧版本或异常持久化的项目级 Tab', () => {
+    expect(sanitizeWorkspaceComponentTabs(['todos', '', 'legacy-memory', 'memory'])).toEqual(['todos', 'memory'])
+  })
+
+  test('委派子 Agent 标题为空时使用可见的默认 Tab 标签', () => {
+    expect(getDelegationTabLabel('  ')).toBe('委派任务')
+    expect(getDelegationTabLabel(undefined)).toBe('委派任务')
+    expect(getDelegationTabLabel('整理 PR')).toBe('整理 PR')
+  })
+})
 
 describe('Agent 上下文压缩状态', () => {
   test('given Pi 手动压缩提供预估 token when 压缩完成 then 显示预估值并清除旧明细', () => {
@@ -141,10 +206,7 @@ describe('Agent 上下文压缩状态', () => {
     })
     expect(resumed.contextCompaction).toBeUndefined()
     expect(resumed.compactInFlight).toBe(false)
-    expect(resumed.toolActivities).toContainEqual(expect.objectContaining({
-      toolUseId: 'resume-task',
-      done: false,
-    }))
+    expect('toolActivities' in resumed).toBe(false)
   })
 
   test('given 压缩成功 when 当前流直接结束 then 保留终态反馈给短时完成提示', () => {
@@ -215,7 +277,7 @@ describe('Agent retry 状态机', () => {
     expect(exhausted.retrying?.history[0]).toMatchObject({ attempt: 8, timestamp: 2_000, reason: '最终请求仍然失败' })
   })
 
-  test('given retry 成功 when 后续输出到达 then 成功状态被自然收起', () => {
+  test('given retry 成功 when 后续工具调用到达 then 成功状态被自然收起', () => {
     const running = applyAgentEvent(createStreamState({ startedAt: runStartedAt }), {
       type: 'retry_attempt',
       attemptData: retryAttempt,
@@ -230,7 +292,18 @@ describe('Agent retry 状态机', () => {
     })
 
     expect(succeeded.retrying?.phase).toBe('succeeded')
-    expect(applyAgentEvent(succeeded, { type: 'text_delta', text: '已恢复' }).retrying).toBeUndefined()
+    expect(applyAgentEvent(succeeded, {
+      type: 'tool_start',
+      toolName: 'Read',
+      toolUseId: 'resume-read',
+      input: {},
+    }).retrying).toBeUndefined()
+  })
+
+  test('given legacy text delta when the runtime reducer receives it then it does not duplicate the live transcript', () => {
+    const state = createStreamState()
+
+    expect(applyAgentEvent(state, { type: 'text_delta', text: '只由 live SDKMessage 渲染' })).toBe(state)
   })
 
   test('given 旧 run 的 retry 终态 when 新流已经开始 then 忽略迟到事件', () => {
@@ -285,5 +358,88 @@ describe('Agent 流式错误状态', () => {
     const errors = new Map([['failed-session', '认证失败']])
 
     expect(clearAgentStreamError(errors, 'retried-session')).toBe(errors)
+  })
+})
+
+describe('Agent per-session 流式状态 family', () => {
+  test('given another session changes when the active family is subscribed then it does not notify', () => {
+    const store = createStore()
+    const activeAtom = agentSessionStreamingStateAtomFamily('active-session')
+    const otherAtom = agentSessionStreamingStateAtomFamily('other-session')
+    const activeState = createStreamState()
+    const otherState = createStreamState({ inputTokens: 20_000 })
+
+    store.set(activeAtom, activeState)
+    store.set(otherAtom, otherState)
+    store.get(activeAtom)
+
+    let notifications = 0
+    const unsubscribe = store.sub(activeAtom, () => {
+      notifications += 1
+    })
+
+    store.set(otherAtom, { ...otherState, inputTokens: 21_000 })
+
+    expect(notifications).toBe(0)
+    expect(store.get(agentStreamingStatesAtom).get('active-session')).toBe(activeState)
+    expect(store.get(agentStreamingStatesAtom).get('other-session')?.inputTokens).toBe(21_000)
+    unsubscribe()
+  })
+
+  test('given a session family update when the aggregate compatibility atom is read then it reflects the same state reference', () => {
+    const store = createStore()
+    const state = createStreamState({ running: true })
+    store.set(agentSessionStreamingStateAtomFamily('active-session'), state)
+
+    expect(store.get(agentStreamingStatesAtom)).toEqual(new Map([['active-session', state]]))
+  })
+})
+
+
+describe('Agent 输入流状态订阅隔离', () => {
+  test('given usage changes in the active session when the input selector is subscribed then it does not notify', () => {
+    const store = createStore()
+    const inputStateAtom = agentSessionInputStreamStateAtomFamily('active-session')
+    const runningState = createStreamState({ inputTokens: 10_000 })
+    store.set(agentStreamingStatesAtom, new Map([['active-session', runningState]]))
+    store.get(inputStateAtom)
+
+    let notifications = 0
+    const unsubscribe = store.sub(inputStateAtom, () => {
+      notifications += 1
+    })
+
+    store.set(agentStreamingStatesAtom, new Map([[
+      'active-session',
+      { ...runningState, inputTokens: 12_000, outputTokens: 900 },
+    ]]))
+
+    expect(notifications).toBe(0)
+    unsubscribe()
+  })
+
+  test('given another session changes when the input selector is subscribed then it does not notify', () => {
+    const store = createStore()
+    const inputStateAtom = agentSessionInputStreamStateAtomFamily('active-session')
+    const activeState = createStreamState()
+    const otherState = createStreamState({ inputTokens: 20_000 })
+    store.set(agentStreamingStatesAtom, new Map([
+      ['active-session', activeState],
+      ['other-session', otherState],
+    ]))
+    store.get(inputStateAtom)
+
+    let notifications = 0
+    const unsubscribe = store.sub(inputStateAtom, () => {
+      notifications += 1
+    })
+
+    store.set(agentStreamingStatesAtom, new Map([
+      ['active-session', activeState],
+      ['other-session', { ...otherState, inputTokens: 21_000 }],
+    ]))
+
+    expect(notifications).toBe(0)
+    unsubscribe()
   })
 })

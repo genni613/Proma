@@ -4,12 +4,12 @@ import { AppShell } from './components/app-shell/AppShell'
 import { OnboardingView } from './components/onboarding/OnboardingView'
 import { TutorialBanner } from './components/tutorial/TutorialBanner'
 import { EnvironmentCheckDialog } from './components/environment/EnvironmentCheckDialog'
-import { MigrationImportDialog } from './components/migration/MigrationImportDialog'
 import { TooltipProvider } from './components/ui/tooltip'
 import { ShortcutGuideDialog } from './components/shortcuts/ShortcutGuideDialog'
 import { FaqDialog } from './components/shortcuts/FaqDialog'
 import { WindowControls } from './components/WindowControls'
-import { detectIsWindows, WINDOW_CONTROLS_INSET_RIGHT } from './lib/platform'
+import { detectIsWindows } from './lib/platform'
+import { getWindowTitlebarContentInsetClass } from './lib/window-titlebar-layout'
 import { cn } from './lib/utils'
 import { PlanningReminderRail } from './components/planning/PlanningReminderRail'
 import { conversationsAtom } from './atoms/chat-atoms'
@@ -20,7 +20,6 @@ import { tabsAtom, activeTabIdAtom, openTab, TUTORIAL_TAB_ID } from './atoms/tab
 import { hasCompletedCurrentOnboarding } from '../types'
 import hopperSeasideWhiteHouse from './assets/onboarding/hopper-seaside-white-house.png'
 import promaMarkWhite from './assets/onboarding/proma-mark-white.svg'
-import type { AppShellContextType } from './contexts/AppShellContext'
 
 export default function App(): React.ReactElement {
   // 应用级初始化状态。
@@ -109,40 +108,27 @@ export default function App(): React.ReactElement {
   // 显示 onboarding 界面
   if (showOnboarding) {
     return (
-      <TooltipProvider delayDuration={200}>
-        <div className="relative h-screen w-screen overflow-hidden">
-          {/* Onboarding 绕过 AppShell 时仍需提供隐藏标题栏窗口的拖拽区，并避开 Windows 控制按钮。 */}
-          <div
-            aria-hidden="true"
-            className={cn(
-              'titlebar-drag-region fixed left-0 top-0 z-50 h-[50px]',
-              isWindows ? WINDOW_CONTROLS_INSET_RIGHT : 'right-0',
-            )}
-          />
+      <TooltipProvider delayDuration={200} disableHoverableContent>
+        <div className={cn('relative h-screen w-screen overflow-hidden', getWindowTitlebarContentInsetClass(isWindows))}>
           <WindowControls />
           <OnboardingView
             initialStep={isReplayingOnboarding ? 'guide' : 'welcome'}
             onComplete={handleOnboardingComplete}
           />
-          <MigrationImportDialog />
         </div>
       </TooltipProvider>
     )
   }
 
-  // Placeholder context value
-  const contextValue: AppShellContextType = {}
-
   // 显示主界面
   return (
-    <TooltipProvider delayDuration={200}>
-      <AppShell contextValue={contextValue} />
+    <TooltipProvider delayDuration={200} disableHoverableContent>
+      <AppShell />
       <PlanningReminderRail />
       <ShortcutGuideDialog />
       <FaqDialog />
       <TutorialBanner />
       <GlobalEnvironmentCheckDialog />
-      <MigrationImportDialog />
     </TooltipProvider>
   )
 }
@@ -182,7 +168,6 @@ function StartupLoadingScreen(): React.ReactElement {
           <div className="h-full w-2/5 animate-pulse bg-white/90" />
         </div>
         <p className="mt-4 text-sm font-medium tracking-[0.08em] text-white/95">正在启动 Proma</p>
-        <p className="mt-2 text-xs tracking-[0.12em] text-white/70">正在初始化你的工作空间</p>
       </div>
 
       <p className="absolute bottom-8 px-6 text-center text-[11px] uppercase tracking-[0.3em] text-white/65">
