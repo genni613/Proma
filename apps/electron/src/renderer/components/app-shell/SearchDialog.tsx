@@ -20,6 +20,7 @@ import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Search, X, MessageSquare, Bot, Archive, Loader2, FolderOpen } from 'lucide-react'
 import { Dialog, DialogContent, DialogPortal, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { SearchMatchHighlight } from './SearchMatchHighlight'
 import {
   GLOBAL_SEARCH_SCOPE,
   updateMessageSearchNavigationAtom,
@@ -86,19 +87,16 @@ function HighlightText({ text, query }: { text: string; query: string }): React.
   const after = text.slice(match.matchStart + match.matchLength)
 
   return (
-    <>
-      {before}
-      <mark className="bg-primary/20 text-foreground rounded-sm px-0.5">{matchedText}</mark>
-      {after}
-    </>
+    <SearchMatchHighlight before={before} match={matchedText} after={after} />
   )
 }
 
 /** 高亮 snippet 中的匹配部分（使用预计算位置） */
-function HighlightSnippet({ snippet, matchStart, matchLength }: {
+function HighlightSnippet({ snippet, matchStart, matchLength, projectSearch }: {
   snippet: string
   matchStart: number
   matchLength: number
+  projectSearch: boolean
 }): React.ReactElement {
   if (matchStart < 0 || matchStart >= snippet.length) return <>{snippet}</>
 
@@ -107,11 +105,12 @@ function HighlightSnippet({ snippet, matchStart, matchLength }: {
   const after = snippet.slice(matchStart + matchLength)
 
   return (
-    <>
-      {before}
-      <mark className="bg-primary/20 text-foreground rounded-sm px-0.5">{match}</mark>
-      {after}
-    </>
+    <SearchMatchHighlight
+      before={before}
+      match={match}
+      after={after}
+      projectSearch={projectSearch}
+    />
   )
 }
 
@@ -128,6 +127,7 @@ interface SearchResultRowProps {
   index: number
   isSelected: boolean
   committedQuery: string
+  isProjectSearch: boolean
   miniMapDisabled?: boolean
   getAgentWorkspaceName: (sessionId: string) => string | undefined
   onSelect: (result: SearchResult) => void
@@ -139,6 +139,7 @@ function SearchResultRow({
   index,
   isSelected,
   committedQuery,
+  isProjectSearch,
   miniMapDisabled,
   getAgentWorkspaceName,
   onSelect,
@@ -188,6 +189,7 @@ function SearchResultRow({
               snippet={result.snippet}
               matchStart={result.matchStart}
               matchLength={result.matchLength}
+              projectSearch={isProjectSearch}
             />
           </div>
         )}
@@ -628,6 +630,7 @@ export function SearchDialog(): React.ReactElement {
                   index={idx}
                   isSelected={selectedIndex === idx}
                   committedQuery={committedQuery}
+                  isProjectSearch={isProjectSearch}
                   miniMapDisabled={!sessionHoverPreviewEnabled}
                   getAgentWorkspaceName={getAgentWorkspaceName}
                   onSelect={navigateToResult}
@@ -651,6 +654,7 @@ export function SearchDialog(): React.ReactElement {
                   index={titleResults.length + i}
                   isSelected={selectedIndex === titleResults.length + i}
                   committedQuery={committedQuery}
+                  isProjectSearch={isProjectSearch}
                   miniMapDisabled={!sessionHoverPreviewEnabled}
                   getAgentWorkspaceName={getAgentWorkspaceName}
                   onSelect={navigateToResult}

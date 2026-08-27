@@ -97,7 +97,7 @@
 
   :root {
     /* 跨主题搜索定位色：固定高对比黄底深字，不跟随可能接近页面背景的品牌主色。 */
-    --search-highlight-background: 48 96% 53%;
+    --search-highlight-background: 50 98% 64%;
     --search-highlight-foreground: 222 47% 11%;
 
     --background: 0 0% 100%;
