@@ -17,10 +17,15 @@
 
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { Search, X, MessageSquare, Bot, Archive, Loader2 } from 'lucide-react'
+import { Search, X, MessageSquare, Bot, Archive, Loader2, FolderOpen } from 'lucide-react'
 import { Dialog, DialogContent, DialogPortal, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
-import { searchDialogOpenAtom } from '@/atoms/search-atoms'
+import {
+  GLOBAL_SEARCH_SCOPE,
+  messageSearchNavigationAtom,
+  searchDialogOpenAtom,
+  searchScopeAtom,
+} from '@/atoms/search-atoms'
 import { conversationsAtom, channelsAtom } from '@/atoms/chat-atoms'
 import {
   agentSessionsAtom,
@@ -42,6 +47,7 @@ import type {
   AgentMessageSearchResult,
 } from '@proma/shared'
 import { findBestSearchMatch } from '@proma/shared'
+import { createProjectMessageSearchNavigation } from '@/lib/message-search-navigation'
 
 /** 标题搜索结果项 */
 interface TitleResult {
@@ -205,6 +211,8 @@ function SearchResultRow({
 
 export function SearchDialog(): React.ReactElement {
   const [open, setOpen] = useAtom(searchDialogOpenAtom)
+  const [searchScope, setSearchScope] = useAtom(searchScopeAtom)
+  const setMessageSearchNavigation = useSetAtom(messageSearchNavigationAtom)
   const conversations = useAtomValue(conversationsAtom)
   const agentSessions = useAtomValue(agentSessionsAtom)
   const sessionHoverPreviewEnabled = useAtomValue(sessionHoverPreviewEnabledAtom)
@@ -216,6 +224,7 @@ export function SearchDialog(): React.ReactElement {
   const setActiveView = useSetAtom(activeViewAtom)
   const openSession = useOpenSession()
   const { createAgent } = useCreateSession()
+  const isProjectSearch = searchScope.kind === 'project'
 
   const workspaceNameMap = React.useMemo(() => {
     const map = new Map<string, string>()
@@ -289,27 +298,34 @@ export function SearchDialog(): React.ReactElement {
     setLoading(true)
     setSelectedIndex(0)
 
-    const isChatMode = appMode === 'chat'
-    const isAgentMode = appMode === 'agent'
+    const isChatMode = !isProjectSearch && appMode === 'chat'
+    const isAgentMode = isProjectSearch || appMode === 'agent'
     const matchesTitle = (title: string): boolean => findBestSearchMatch(title, q) !== null
-    const titles: TitleResult[] = (isChatMode
-      ? conversations
-        .filter((c) => matchesTitle(c.title))
-        .map((c) => ({ id: c.id, title: c.title, type: 'chat' as const, archived: c.archived, updatedAt: c.updatedAt }))
-      : isAgentMode
-        ? agentSessions
-          .filter((s) => matchesTitle(s.title))
-          .map((s) => ({ id: s.id, title: s.title, type: 'agent' as const, archived: s.archived, updatedAt: s.updatedAt }))
-        : [])
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, 20)
+    const titles: TitleResult[] = isProjectSearch
+      ? []
+      : (isChatMode
+        ? conversations
+          .filter((c) => matchesTitle(c.title))
+          .map((c) => ({ id: c.id, title: c.title, type: 'chat' as const, archived: c.archived, updatedAt: c.updatedAt }))
+        : isAgentMode
+          ? agentSessions
+            .filter((s) => matchesTitle(s.title))
+            .map((s) => ({ id: s.id, title: s.title, type: 'agent' as const, archived: s.archived, updatedAt: s.updatedAt }))
+          : [])
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 20)
 
     setTitleResults(titles)
 
     try {
       const [chatResults, agentResults] = await Promise.all([
         isChatMode ? window.electronAPI.searchConversationMessages(q) : Promise.resolve([]),
-        isAgentMode ? window.electronAPI.searchAgentSessionMessages(q) : Promise.resolve([]),
+        isAgentMode
+          ? window.electronAPI.searchAgentSessionMessages(
+            q,
+            isProjectSearch ? { workspaceId: searchScope.workspaceId } : undefined,
+          )
+          : Promise.resolve([]),
       ])
       if (token !== searchTokenRef.current) return
 
@@ -346,7 +362,7 @@ export function SearchDialog(): React.ReactElement {
     } finally {
       if (token === searchTokenRef.current) setLoading(false)
     }
-  }, [query, conversations, agentSessions, appMode])
+  }, [query, conversations, agentSessions, appMode, isProjectSearch, searchScope])
 
   const handleAgentSearch = React.useCallback(async () => {
     const q = query.trim()
@@ -376,8 +392,9 @@ export function SearchDialog(): React.ReactElement {
 
     setAgentPendingPrompt({ sessionId, message: prompt })
     setOpen(false)
+    setSearchScope(GLOBAL_SEARCH_SCOPE)
     setActiveView('conversations')
-  }, [query, channels, currentAgentChannelId, createAgent, setAgentPendingPrompt, setOpen, setActiveView])
+  }, [query, channels, currentAgentChannelId, createAgent, setAgentPendingPrompt, setOpen, setSearchScope, setActiveView])
 
   // 全部结果列表（标题在前、内容在后）
   const allResults = React.useMemo<SearchResult[]>(
@@ -388,18 +405,36 @@ export function SearchDialog(): React.ReactElement {
   // 导航到对话/会话
   const navigateToResult = React.useCallback((result: TitleResult | ContentResult) => {
     setOpen(false)
+    setSearchScope(GLOBAL_SEARCH_SCOPE)
     setActiveView('conversations')
 
     if (result.type === 'chat') {
+      setMessageSearchNavigation(null)
       const conv = conversations.find((c) => c.id === result.id)
       const title = conv?.title ?? result.title
       openSession('chat', result.id, title)
     } else {
+      setMessageSearchNavigation(isContentResult(result)
+        ? createProjectMessageSearchNavigation(isProjectSearch, {
+          type: result.type,
+          sessionId: result.id,
+          messageId: result.messageId,
+          query: committedQuery,
+          snippet: result.snippet,
+          matchStart: result.matchStart,
+          matchLength: result.matchLength,
+        })
+        : null)
       const session = agentSessions.find((s) => s.id === result.id)
       const title = session?.title ?? result.title
       openSession('agent', result.id, title)
     }
-  }, [setOpen, setActiveView, openSession, conversations, agentSessions])
+  }, [setOpen, setSearchScope, setActiveView, setMessageSearchNavigation, openSession, conversations, agentSessions, committedQuery, isProjectSearch])
+
+  const handleOpenChange = React.useCallback((nextOpen: boolean): void => {
+    setOpen(nextOpen)
+    if (!nextOpen) setSearchScope(GLOBAL_SEARCH_SCOPE)
+  }, [setOpen, setSearchScope])
 
   /**
    * Enter 键语义：
@@ -437,7 +472,7 @@ export function SearchDialog(): React.ReactElement {
     }
   }, [selectedIndex])
 
-  // 打开时重置状态并聚焦
+  // 打开或切换搜索范围时重置状态，避免项目结果残留到全局搜索（反向亦然）。
   React.useEffect(() => {
     if (open) {
       searchTokenRef.current += 1
@@ -450,14 +485,14 @@ export function SearchDialog(): React.ReactElement {
       setLoading(false)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
-  }, [open])
+  }, [open, searchScope])
 
   const trimmedQuery = query.trim()
   const canSearch = trimmedQuery.length >= 2 && !loading
   const isQueryDirty = trimmedQuery !== committedQuery
 
   return (
-    <Dialog open={open} onOpenChange={setOpen} modal={false}>
+    <Dialog open={open} onOpenChange={handleOpenChange} modal={false}>
       {/* 非交互式背景遮罩：modal=false 时 Radix 不渲染原生 overlay（避免拦截 hover 预览的事件），
        * 这里手动通过 DialogPortal 在 document.body 渲染一个 pointer-events-none 的 blur 层——
        * Portal 是关键：直接渲染会被父级 stacking context（如 MainContentPanel）困住，导致只覆盖到
@@ -477,10 +512,21 @@ export function SearchDialog(): React.ReactElement {
         className="w-[min(720px,calc(100vw_-_32px))] sm:max-w-[720px] p-0 gap-0 overflow-hidden"
         aria-describedby={undefined}
       >
-        <DialogTitle className="sr-only">搜索对话</DialogTitle>
+        <DialogTitle className="sr-only">
+          {isProjectSearch ? `搜索项目 ${searchScope.workspaceName}` : '搜索对话'}
+        </DialogTitle>
         {/* 搜索输入框 */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border/50">
           <Search size={16} className="text-foreground/40 flex-shrink-0" />
+          {isProjectSearch && (
+            <span
+              className="flex max-w-[180px] shrink-0 items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-[12px] text-foreground/65"
+              title={`搜索项目：${searchScope.workspaceName}`}
+            >
+              <FolderOpen size={12} className="shrink-0 text-primary/70" />
+              <span className="truncate">{searchScope.workspaceName}</span>
+            </span>
+          )}
           <input
             ref={inputRef}
             value={query}
@@ -488,7 +534,7 @@ export function SearchDialog(): React.ReactElement {
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
             onKeyDown={handleKeyDown}
-            placeholder="输入关键词，按 Enter 或点击搜索"
+            placeholder={isProjectSearch ? '搜索此项目下的所有 Session' : '输入关键词，按 Enter 或点击搜索'}
             className="min-w-0 flex-1 bg-transparent text-[14px] text-foreground placeholder:text-foreground/40 outline-none"
           />
           {query && (
@@ -513,20 +559,22 @@ export function SearchDialog(): React.ReactElement {
             {loading ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
             <span>搜索</span>
           </button>
-          <button
-            onClick={() => void handleAgentSearch()}
-            disabled={trimmedQuery.length < 2}
-            title="适合在精准搜索找不到的情况下使用，Agent 会帮助你搜索整个 Proma 会话空间"
-            className={cn(
-              'flex shrink-0 items-center gap-1 px-2 py-1 rounded text-[12px] font-medium transition-colors',
-              trimmedQuery.length >= 2
-                ? 'bg-blue-500/10 text-blue-500 hover:bg-blue-500/20'
-                : 'bg-foreground/[0.06] text-foreground/30 cursor-not-allowed'
-            )}
-          >
-            <Bot size={12} />
-            <span>Agent 搜索</span>
-          </button>
+          {!isProjectSearch && (
+            <button
+              onClick={() => void handleAgentSearch()}
+              disabled={trimmedQuery.length < 2}
+              title="适合在精准搜索找不到的情况下使用，Agent 会帮助你搜索整个 Proma 会话空间"
+              className={cn(
+                'flex shrink-0 items-center gap-1 px-2 py-1 rounded text-[12px] font-medium transition-colors',
+                trimmedQuery.length >= 2
+                  ? 'bg-blue-500/10 text-blue-500 hover:bg-blue-500/20'
+                  : 'bg-foreground/[0.06] text-foreground/30 cursor-not-allowed'
+              )}
+            >
+              <Bot size={12} />
+              <span>Agent 搜索</span>
+            </button>
+          )}
         </div>
 
         {/* 搜索结果 */}
@@ -552,13 +600,15 @@ export function SearchDialog(): React.ReactElement {
           {hasSearched && !loading && allResults.length === 0 && (
             <div className="py-8 flex flex-col items-center gap-3 text-[13px] text-foreground/40">
               <span>未找到匹配结果</span>
-              <button
-                onClick={() => void handleAgentSearch()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 transition-colors"
-              >
-                <Bot size={12} />
-                <span>试试 Agent 搜索</span>
-              </button>
+              {!isProjectSearch && (
+                <button
+                  onClick={() => void handleAgentSearch()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 transition-colors"
+                >
+                  <Bot size={12} />
+                  <span>试试 Agent 搜索</span>
+                </button>
+              )}
             </div>
           )}
 

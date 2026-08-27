@@ -38,6 +38,7 @@ import type {
   AgentWorkspace,
   ForkSessionInput,
   AgentMessageSearchResult,
+  AgentMessageSearchOptions,
   AgentSessionReferenceSearchInput,
   AgentSessionReferenceSearchResult,
   AgentCwdMode,
@@ -1301,18 +1302,24 @@ export function cleanupStaleAttachedPaths(): number {
 
 /**
  * 搜索 Agent 会话正文。
- * 每个会话最多返回 2 个用户/助手正文命中，最多返回 100 个命中会话。
+ * 每个会话最多返回 2 个用户/助手正文命中；全局搜索最多返回 100 个命中会话，
+ * 指定项目时则遍历该项目的全部会话。
  */
-export async function searchAgentSessionMessages(query: string): Promise<AgentMessageSearchResult[]> {
+export async function searchAgentSessionMessages(
+  query: string,
+  options: AgentMessageSearchOptions = {},
+): Promise<AgentMessageSearchResult[]> {
   if (!query || query.length < 2) return []
 
   const index = readIndex()
   const results: AgentMessageSearchResult[] = []
   let matchedSessionCount = 0
 
-  const sortedSessions = [...index.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  const sortedSessions = index.sessions
+    .filter((session) => !options.workspaceId || session.workspaceId === options.workspaceId)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
   for (const session of sortedSessions) {
-    if (matchedSessionCount >= MAX_SEARCH_SESSIONS) break
+    if (!options.workspaceId && matchedSessionCount >= MAX_SEARCH_SESSIONS) break
 
     const filePath = getAgentSessionMessagesPath(session.id)
     if (!existsSync(filePath)) continue

@@ -856,6 +856,12 @@ export interface AgentMessage {
 
 // ===== Agent 消息搜索 =====
 
+/** Agent 会话正文搜索范围。 */
+export interface AgentMessageSearchOptions {
+  /** 仅搜索指定项目（底层沿用 workspace ID）。 */
+  workspaceId?: string
+}
+
 /**
  * Agent 会话消息搜索结果
  */

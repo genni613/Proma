@@ -292,6 +292,38 @@ describe('Agent 会话 runtime 元数据', () => {
 })
 
 describe('Agent 会话正文搜索', () => {
+  test('Given 两个项目都有匹配消息 When 搜索指定项目 Then 只返回该项目下的 Session', async () => {
+    writeAgentSessionsIndex([
+      {
+        id: 'workspace-a-session',
+        title: '项目 A 会话',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      {
+        id: 'workspace-b-session',
+        title: '项目 B 会话',
+        workspaceId: 'workspace-b',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])
+    writeAgentSessionJsonl('workspace-a-session', [
+      JSON.stringify({ type: 'user', uuid: 'workspace-a-message', message: { content: [{ type: 'text', text: '项目搜索命中词' }] } }),
+    ])
+    writeAgentSessionJsonl('workspace-b-session', [
+      JSON.stringify({ type: 'user', uuid: 'workspace-b-message', message: { content: [{ type: 'text', text: '项目搜索命中词' }] } }),
+    ])
+
+    const results = await manager.searchAgentSessionMessages('项目搜索命中词', {
+      workspaceId: 'workspace-a',
+    })
+
+    expect(results.map((result) => result.sessionId)).toEqual(['workspace-a-session'])
+    expect(results.map((result) => result.messageId)).toEqual(['workspace-a-message'])
+  })
+
   test('Given 用户/助手正文和内部块 When 搜索 Then 只返回最多两个不同正文消息命中', async () => {
     writeAgentSessionsIndex([{
       id: 'search-content-session',
@@ -394,6 +426,27 @@ describe('Agent 会话正文搜索', () => {
     expect(results).toHaveLength(200)
     expect([...sessionIds][0]).toBe('session-100')
     expect(results.filter((result) => result.sessionId === 'session-100')).toHaveLength(2)
+  })
+
+  test('Given 项目有超过 100 个命中会话 When 搜索指定项目 Then 覆盖该项目下的全部 Session', async () => {
+    const sessions = createIndexedSessions(101)
+    writeAgentSessionsIndex(sessions)
+    for (const session of sessions) {
+      writeAgentSessionJsonl(session.id, [
+        JSON.stringify({
+          type: 'user',
+          uuid: `${session.id}-message`,
+          message: { content: [{ type: 'text', text: '项目完整搜索命中词' }] },
+        }),
+      ])
+    }
+
+    const results = await manager.searchAgentSessionMessages('项目完整搜索命中词', {
+      workspaceId: 'workspace-a',
+    })
+
+    expect(new Set(results.map((result) => result.sessionId))).toHaveLength(101)
+    expect(results.some((result) => result.sessionId === 'session-0')).toBe(true)
   })
 })
 
