@@ -58,7 +58,10 @@ export function reduceMessageSearchNavigationState(
   if (action.type === 'activate') {
     return { pendingNavigation: null, activeHighlight: action.navigation }
   }
-  if (action.type === 'clear') return createMessageSearchNavigationState()
+  if (action.type === 'clear') {
+    if (!state.pendingNavigation && !state.activeHighlight) return state
+    return createMessageSearchNavigationState()
+  }
 
   const pendingNavigation = state.pendingNavigation?.sessionId === action.sessionId
     ? null
@@ -77,6 +80,16 @@ export function shouldClearMessageSearchHighlightOnSessionLeave(
 ): boolean {
   return state.pendingNavigation?.sessionId === sessionId
     || state.activeHighlight?.sessionId === sessionId
+}
+
+/** 用户开始普通页面交互时，同时清理窗口级视觉高亮并返回对应状态动作。 */
+export function dismissMessageSearchHighlight(
+  state: MessageSearchNavigationState,
+  clearVisualHighlight: () => void,
+): MessageSearchNavigationAction | null {
+  if (!state.pendingNavigation && !state.activeHighlight) return null
+  clearVisualHighlight()
+  return { type: 'clear' }
 }
 
 /** 仅项目内的 Agent 正文结果创建精确定位请求，避免扩大全局搜索行为。 */

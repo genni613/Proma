@@ -47,6 +47,7 @@ import {
   updateMessageSearchNavigationAtom,
 } from '@/atoms/search-atoms'
 import {
+  dismissMessageSearchHighlight,
   resolveMessageSearchAnchorId,
   resolveMessageSearchTextRange,
   shouldClearMessageSearchHighlightOnSessionLeave,
@@ -989,8 +990,13 @@ export const AgentMessages = React.memo(function AgentMessages({
     const root = historySelectionRootRef.current
     if (!root) return
     const clearOnPointerDown = (): void => {
-      // 仅清理已存在的高亮；不读取 Selection 或触发历史渲染。
+      // 用户开始新的页面交互后清理定位提示，不读取 Selection 或触发历史渲染。
       clearHistoryQuoteHighlight()
+      const action = dismissMessageSearchHighlight(
+        messageSearchNavigationStateRef.current,
+        clearMessageSearchHighlight,
+      )
+      if (action) updateMessageSearchNavigation(action)
     }
     // 保留根外点击的高亮清理；该监听不参与选区捕获热路径。
     document.addEventListener('pointerdown', clearOnPointerDown, true)
@@ -998,7 +1004,7 @@ export const AgentMessages = React.memo(function AgentMessages({
       document.removeEventListener('pointerdown', clearOnPointerDown, true)
       clearHistoryQuoteHighlight()
     }
-  }, [clearHistoryQuoteHighlight])
+  }, [clearHistoryQuoteHighlight, clearMessageSearchHighlight, updateMessageSearchNavigation])
 
   // 搜索关键词高亮在导航请求消费后继续保留；离开当前会话时清理对应状态。
   React.useEffect(() => () => {
@@ -1296,8 +1302,8 @@ export const AgentMessages = React.memo(function AgentMessages({
           color: inherit;
         }
         ::highlight(${AGENT_MESSAGE_SEARCH_HIGHLIGHT_NAME}) {
-          background-color: hsl(var(--primary) / 0.38);
-          color: inherit;
+          background-color: hsl(var(--primary));
+          color: hsl(var(--primary-foreground));
         }
       `}</style>
           <Conversation resize="instant" className={ready ? 'opacity-100' : 'opacity-0'}>

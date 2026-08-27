@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   createProjectMessageSearchNavigation,
   createMessageSearchNavigationState,
+  dismissMessageSearchHighlight,
   reduceMessageSearchNavigationState,
   resolveMessageSearchAnchorId,
   resolveMessageSearchTextRange,
@@ -152,5 +153,59 @@ describe('项目搜索结果消息定位', () => {
     })).toEqual(activeState)
     expect(shouldClearMessageSearchHighlightOnSessionLeave(activeState, 'session-1')).toBe(false)
     expect(shouldClearMessageSearchHighlightOnSessionLeave(activeState, 'session-2')).toBe(true)
+  })
+
+  test('Given 跳转关键词仍在高亮 When 用户普通点击页面 Then 同时清除视觉高亮和导航状态', () => {
+    const activeState = {
+      pendingNavigation: null,
+      activeHighlight: {
+        sessionId: 'session-1',
+        messageId: 'message-1',
+        query: '关键词',
+        snippet: '命中关键词',
+        matchStart: 2,
+        matchLength: 3,
+      },
+    }
+    let visualHighlightCleared = false
+
+    const action = dismissMessageSearchHighlight(activeState, () => {
+      visualHighlightCleared = true
+    })
+
+    expect(visualHighlightCleared).toBe(true)
+    expect(action).toEqual({ type: 'clear' })
+    expect(reduceMessageSearchNavigationState(activeState, action!))
+      .toEqual(createMessageSearchNavigationState())
+  })
+
+  test('Given 搜索结果点击先清除旧高亮 When 随后的 click 创建新请求 Then 新导航不受 pointerdown 影响', () => {
+    const oldNavigation = {
+      sessionId: 'session-1',
+      messageId: 'old-message',
+      query: '旧词',
+      snippet: '旧词',
+      matchStart: 0,
+      matchLength: 2,
+    }
+    const newNavigation = {
+      ...oldNavigation,
+      messageId: 'new-message',
+      query: '新词',
+      snippet: '新词',
+    }
+    const activeState = { pendingNavigation: null, activeHighlight: oldNavigation }
+    const dismissed = reduceMessageSearchNavigationState(
+      activeState,
+      dismissMessageSearchHighlight(activeState, () => {})!,
+    )
+
+    expect(reduceMessageSearchNavigationState(dismissed, {
+      type: 'request',
+      navigation: newNavigation,
+    })).toEqual({
+      pendingNavigation: newNavigation,
+      activeHighlight: null,
+    })
   })
 })
