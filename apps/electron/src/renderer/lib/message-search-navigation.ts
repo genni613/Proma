@@ -1,7 +1,10 @@
 import { findBestSearchMatch } from '@proma/shared'
 
+/** 页面上一条可定位的消息组锚点。 */
 export interface MessageSearchAnchor {
+  /** 页面实际渲染在 data-message-id 上的 ID。 */
   anchorId: string
+  /** 该消息组包含的持久化消息 ID。 */
   messageIds: string[]
 }
 
@@ -113,7 +116,10 @@ export function shouldClearMessageSearchHighlightOnSessionLeave(
   return ownsNavigation(state.pendingNavigation) || ownsNavigation(state.activeHighlight)
 }
 
-/** 使用搜索摘要上下文，在渲染后的文本中选择正确的同词命中。 */
+/**
+ * 利用搜索结果携带的上下文，在合并渲染的助手 turn 中找到准确的那次命中。
+ * 完整 snippet 因 Markdown 标记变化无法直接匹配时，使用左右上下文为同词候选打分。
+ */
 export function resolveMessageSearchTextRange(
   renderedText: string,
   navigation: Pick<MessageSearchNavigationRequest, 'query' | 'snippet' | 'matchStart' | 'matchLength'>,
@@ -167,6 +173,10 @@ export function resolveMessageSearchTextRange(
   return best?.range ?? findBestSearchMatch(renderedText, query)
 }
 
+/**
+ * 将搜索服务返回的持久化消息 ID 映射到页面实际渲染的消息组锚点。
+ * 一次助手回复可能由多条消息快照组成，但页面只为整组渲染一个锚点。
+ */
 export function resolveMessageSearchAnchorId(
   anchors: MessageSearchAnchor[],
   messageId: string,

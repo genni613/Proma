@@ -258,6 +258,11 @@ interface CustomHighlightRegistry {
 
 type HighlightConstructor = new (...ranges: Range[]) => unknown
 
+interface NamedRangeHighlightResult {
+  applied: boolean
+  usesBrowserSelection: boolean
+}
+
 function getMessageTextPosition(messageElement: HTMLElement, offset: number): TextPosition | null {
   if (!Number.isInteger(offset) || offset < 0) return null
 
@@ -305,18 +310,24 @@ function getCustomHighlightRegistry(): CustomHighlightRegistry | undefined {
   return (globalThis.CSS as unknown as { highlights?: CustomHighlightRegistry }).highlights
 }
 
-function applyAgentHistoryQuoteHighlight(range: Range): boolean {
+function applyNamedRangeHighlight(
+  range: Range,
+  name: string,
+  fallbackToSelection: boolean,
+): NamedRangeHighlightResult {
   const registry = getCustomHighlightRegistry()
   const Highlight = (globalThis as unknown as { Highlight?: HighlightConstructor }).Highlight
   if (registry && Highlight) {
-    registry.set(AGENT_HISTORY_QUOTE_HIGHLIGHT_NAME, new Highlight(range))
-    return false
+    registry.set(name, new Highlight(range))
+    return { applied: true, usesBrowserSelection: false }
   }
 
+  if (!fallbackToSelection) return { applied: false, usesBrowserSelection: false }
   const selection = window.getSelection()
-  selection?.removeAllRanges()
-  selection?.addRange(range)
-  return true
+  if (!selection) return { applied: false, usesBrowserSelection: false }
+  selection.removeAllRanges()
+  selection.addRange(range)
+  return { applied: true, usesBrowserSelection: true }
 }
 
 function getPersistedMessageIds(message: SDKMessage): string[] {
@@ -982,7 +993,11 @@ export const AgentMessages = React.memo(function AgentMessages({
         const range = getAgentHistoryQuoteRange(target, navigation.quote)
         if (!range) return
         target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
-        selectionHighlightUsesBrowserSelectionRef.current = applyAgentHistoryQuoteHighlight(range)
+        selectionHighlightUsesBrowserSelectionRef.current = applyNamedRangeHighlight(
+          range,
+          AGENT_HISTORY_QUOTE_HIGHLIGHT_NAME,
+          true,
+        ).usesBrowserSelection
       }
 
       const targetIndex = visibleGroupsRef.current.findIndex((group) => getGroupId(group) === messageId)

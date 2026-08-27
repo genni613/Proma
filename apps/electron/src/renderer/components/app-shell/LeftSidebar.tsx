@@ -86,7 +86,7 @@ import {
 } from '@/atoms/tab-atoms'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { sidebarViewModeAtom } from '@/atoms/sidebar-atoms'
-import { searchDialogOpenAtom } from '@/atoms/search-atoms'
+import { GLOBAL_SEARCH_SCOPE, searchDialogOpenAtom, searchScopeAtom } from '@/atoms/search-atoms'
 import { hasUpdateAtom, updateStatusAtom, type UpdateStatus } from '@/atoms/updater'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { hasEnvironmentIssuesAtom } from '@/atoms/environment'
@@ -105,6 +105,10 @@ import {
   type SessionMiniMapType,
 } from '@/components/session-preview/SessionMiniMapPopover'
 import { detectIsMac } from '@/lib/platform'
+import {
+  consumeProjectSearchMenuCloseAutoFocus,
+  scheduleProjectSearchOpen,
+} from '@/lib/project-search-menu-action'
 import { ShortcutKeycaps } from '@/components/shortcuts/ShortcutKeycaps'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import {
@@ -801,7 +805,18 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
   const [viewMode, setViewMode] = useAtom(sidebarViewModeAtom)
   const searchDialogOpen = useAtomValue(searchDialogOpenAtom)
   const setSearchDialogOpen = useSetAtom(searchDialogOpenAtom)
+  const setSearchScope = useSetAtom(searchScopeAtom)
   const newChatShortcutLabel = getAcceleratorDisplay(getActiveAccelerator('new-session'))
+
+  const handleOpenGlobalSearch = React.useCallback((): void => {
+    setSearchScope(GLOBAL_SEARCH_SCOPE)
+    setSearchDialogOpen(true)
+  }, [setSearchDialogOpen, setSearchScope])
+
+  const handleOpenProjectSearch = React.useCallback((workspaceId: string, workspaceName: string): void => {
+    setSearchScope({ kind: 'project', workspaceId, workspaceName })
+    setSearchDialogOpen(true)
+  }, [setSearchDialogOpen, setSearchScope])
 
   /** 归档会话只在用户打开归档视图时加载；active 视图只保留未归档元数据。 */
   const refreshAgentSidebarSessions = React.useCallback(async (includeArchived: boolean): Promise<void> => {
@@ -3021,6 +3036,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               onDrop={handleProjectDrop}
               onDragEnd={handleProjectDragEnd}
               onConfigureProject={isAuto ? noopVoid : handleConfigureProject}
+              onSearchProject={isAuto ? noopVoid : handleOpenProjectSearch}
               onRenameWorkspace={isAuto ? noopAsync : handleWorkspaceRename}
               onRelinkProjectRoot={isAuto ? noopAsync : handleRelinkProjectRoot}
               onRequestRestoreProjectRoot={isAuto ? noopVoid : setPendingRestoreProjectRootId}
@@ -3108,6 +3124,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     handleAgentRename,
     handleCollapseExtraSessions,
     handleConfigureProject,
+    handleOpenProjectSearch,
     handleCreateProjectFromFolder,
     handleCreateProjectKeyDown,
     handleProjectDragEnd,
@@ -3248,7 +3265,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               <button
                 type="button"
                 aria-label="搜索"
-                onClick={() => setSearchDialogOpen(true)}
+                onClick={handleOpenGlobalSearch}
                 className="size-10 flex items-center justify-center rounded-[12px] text-foreground/45 sidebar-control-surface hover:text-foreground/70 transition-[background-color,color] duration-150 titlebar-no-drag"
               >
                 <Search size={16} />
@@ -3437,7 +3454,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           <TooltipTrigger asChild>
             <button
               type="button"
-              onClick={() => setSearchDialogOpen(true)}
+              onClick={handleOpenGlobalSearch}
               aria-label="搜索"
               className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-foreground/45 transition-[background-color,color,transform] hover:bg-foreground/[0.055] hover:text-foreground active:scale-[0.96] titlebar-no-drag"
             >
@@ -4533,6 +4550,7 @@ interface AgentProjectGroupItemProps {
   onDrop: (e: React.DragEvent, workspaceId: string) => void
   onDragEnd: () => void
   onConfigureProject: (workspaceId: string) => void
+  onSearchProject: (workspaceId: string, workspaceName: string) => void
   onRenameWorkspace: (workspaceId: string, newName: string) => Promise<void>
   onRelinkProjectRoot: (workspaceId: string) => Promise<void>
   onRequestRestoreProjectRoot: (workspaceId: string) => void
@@ -4575,6 +4593,7 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   onDrop,
   onDragEnd,
   onConfigureProject,
+  onSearchProject,
   onRenameWorkspace,
   onRelinkProjectRoot,
   onRequestRestoreProjectRoot,
@@ -4603,6 +4622,7 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   const [workspaceEditName, setWorkspaceEditName] = React.useState('')
   const workspaceEditRef = React.useRef<HTMLInputElement>(null)
   const justStartedRenamingRef = React.useRef(false)
+  const pendingProjectSearchRef = React.useRef(false)
 
   const handleStartWorkspaceRename = (): void => {
     setWorkspaceEditName(group.workspace.name)
@@ -4778,7 +4798,13 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               <MoreHorizontal size={13} />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-44 z-[9999] min-w-0 p-0.5">
+          <DropdownMenuContent
+            align="start"
+            className="w-44 z-[9999] min-w-0 p-0.5"
+            onCloseAutoFocus={(event) => {
+              consumeProjectSearchMenuCloseAutoFocus(pendingProjectSearchRef, event)
+            }}
+          >
             <DropdownMenuItem
               className="text-xs py-1 [&>svg]:size-3.5"
               onSelect={() => onSelectProject(group.workspace.id)}
@@ -4792,6 +4818,20 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
             >
               <Pencil size={14} />
               重命名
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-xs py-1 [&>svg]:size-3.5"
+              onSelect={() => {
+                pendingProjectSearchRef.current = true
+                scheduleProjectSearchOpen(
+                  onSearchProject,
+                  group.workspace.id,
+                  group.workspace.name,
+                )
+              }}
+            >
+              <Search size={14} />
+              在项目中搜索
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-xs py-1 [&>svg]:size-3.5"

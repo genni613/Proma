@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  buildSearchScopePlan,
   buildGlobalSearchRequest,
   createGlobalTitleResults,
   mergeGlobalContentResults,
@@ -34,11 +35,28 @@ describe('全局搜索范围', () => {
     })
     expect(results.map((result) => result.id)).toEqual(['agent-b', 'agent-a'])
   })
+
+  test('Given 从项目菜单打开搜索 When 构建范围策略 Then 固定当前项目且保持 PR1 的正文搜索语义', () => {
+    const plan = buildSearchScopePlan({
+      projectWorkspaceId: 'workspace-a',
+      selectedWorkspaceIds: ['workspace-b'],
+    })
+
+    expect(plan).toEqual({
+      workspaceIds: ['workspace-a'],
+      includeTitleMatches: false,
+    })
+    expect(buildGlobalSearchRequest(plan.workspaceIds)).toEqual({
+      includeChat: false,
+      agentOptions: { workspaceIds: ['workspace-a'] },
+    })
+  })
 })
 
 describe('全局搜索结果排序', () => {
-  test('Given Chat 和 Agent 内容命中 When 合并结果 Then 去除标题重复项并按会话更新时间统一排序', () => {
+  test('Given Chat 和 Agent 包含精确、模糊及归档命中 When 合并结果 Then 与项目搜索采用相同分级排序', () => {
     const results = mergeGlobalContentResults({
+      query: '搜索优化方案',
       titleResultKeys: new Set(['agent:agent-title-match']),
       chatResults: [
         {
@@ -46,9 +64,9 @@ describe('全局搜索结果排序', () => {
           conversationTitle: '较早 Chat',
           messageId: 'chat-message',
           role: 'user',
-          snippet: '命中内容',
+          snippet: '搜索优化方案',
           matchStart: 0,
-          matchLength: 2,
+          matchLength: 6,
           updatedAt: 10,
         },
       ],
@@ -58,25 +76,36 @@ describe('全局搜索结果排序', () => {
           sessionTitle: '最近 Agent',
           messageId: 'agent-message',
           role: 'assistant',
-          snippet: '这里命中',
-          matchStart: 2,
-          matchLength: 2,
+          snippet: '搜索优花方案',
+          matchStart: 0,
+          matchLength: 6,
           updatedAt: 30,
+        },
+        {
+          sessionId: 'agent-archived',
+          sessionTitle: '归档 Agent',
+          messageId: 'archived-message',
+          role: 'user',
+          snippet: '搜索优化方案',
+          matchStart: 0,
+          matchLength: 6,
+          archived: true,
+          updatedAt: 50,
         },
         {
           sessionId: 'agent-title-match',
           sessionTitle: '标题已命中',
           messageId: 'duplicate-message',
           role: 'user',
-          snippet: '命中',
+          snippet: '搜索优化方案',
           matchStart: 0,
-          matchLength: 2,
+          matchLength: 6,
           updatedAt: 50,
         },
       ],
     })
 
-    expect(results.map((result) => result.id)).toEqual(['agent-new', 'chat-old'])
-    expect(results.map((result) => result.updatedAt)).toEqual([30, 10])
+    expect(results.map((result) => result.id)).toEqual(['chat-old', 'agent-new', 'agent-archived'])
+    expect(results.map((result) => result.matchKind)).toEqual(['exact', 'fuzzy', 'exact'])
   })
 })
