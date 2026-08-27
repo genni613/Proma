@@ -1302,8 +1302,8 @@ export const AgentMessages = React.memo(function AgentMessages({
           color: inherit;
         }
         ::highlight(${AGENT_MESSAGE_SEARCH_HIGHLIGHT_NAME}) {
-          background-color: hsl(var(--primary));
-          color: hsl(var(--primary-foreground));
+          background-color: hsl(var(--search-highlight-background));
+          color: hsl(var(--search-highlight-foreground));
         }
       `}</style>
           <Conversation resize="instant" className={ready ? 'opacity-100' : 'opacity-0'}>
