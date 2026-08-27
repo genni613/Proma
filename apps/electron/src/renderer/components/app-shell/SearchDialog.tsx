@@ -54,6 +54,10 @@ import {
   type GlobalTitleResult as TitleResult,
 } from '@/lib/global-search-results'
 import { createMessageSearchNavigation } from '@/lib/message-search-navigation'
+import {
+  SEARCH_DIALOG_LAYERS,
+  SEARCH_SCOPE_MENU_MODAL,
+} from '@/lib/search-dialog-layering'
 
 type SearchResult = TitleResult | ContentResult
 
@@ -453,13 +457,15 @@ ${scopeDescription}
         <DialogPortal>
           <div
             aria-hidden
-            className="fixed inset-0 z-[99] bg-black/40 pointer-events-none animate-in fade-in-0 duration-150"
+            className="fixed inset-0 bg-black/40 pointer-events-none animate-in fade-in-0 duration-150"
+            style={{ zIndex: SEARCH_DIALOG_LAYERS.overlay }}
           />
         </DialogPortal>
       )}
       <DialogContent
         hideClose
         className="w-[min(720px,calc(100vw_-_32px))] sm:max-w-[720px] p-0 gap-0 overflow-hidden"
+        style={{ zIndex: SEARCH_DIALOG_LAYERS.dialog }}
         aria-describedby={undefined}
       >
         <DialogTitle className="sr-only">搜索对话</DialogTitle>
@@ -518,7 +524,7 @@ ${scopeDescription}
         {agentWorkspaces.length > 0 && (
           <div className="flex items-center gap-2 border-b border-border/30 px-4 py-2">
             <span className="text-[11px] text-foreground/40">搜索范围</span>
-            <DropdownMenu>
+            <DropdownMenu modal={SEARCH_SCOPE_MENU_MODAL}>
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
@@ -532,7 +538,11 @@ ${scopeDescription}
                   <ChevronDown size={12} className="shrink-0 text-foreground/35" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="max-h-[320px] min-w-[240px]">
+              <DropdownMenuContent
+                align="start"
+                className="max-h-[320px] min-w-[240px]"
+                style={{ zIndex: SEARCH_DIALOG_LAYERS.scopeMenu }}
+              >
                 <DropdownMenuLabel className="text-[11px] text-foreground/45">选择一个或多个项目</DropdownMenuLabel>
                 <DropdownMenuCheckboxItem
                   checked={selectedWorkspaceIds.length === 0}
