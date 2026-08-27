@@ -22,7 +22,7 @@ import { Dialog, DialogContent, DialogPortal, DialogTitle } from '@/components/u
 import { cn } from '@/lib/utils'
 import {
   GLOBAL_SEARCH_SCOPE,
-  messageSearchNavigationAtom,
+  updateMessageSearchNavigationAtom,
   searchDialogOpenAtom,
   searchScopeAtom,
 } from '@/atoms/search-atoms'
@@ -212,7 +212,7 @@ function SearchResultRow({
 export function SearchDialog(): React.ReactElement {
   const [open, setOpen] = useAtom(searchDialogOpenAtom)
   const [searchScope, setSearchScope] = useAtom(searchScopeAtom)
-  const setMessageSearchNavigation = useSetAtom(messageSearchNavigationAtom)
+  const updateMessageSearchNavigation = useSetAtom(updateMessageSearchNavigationAtom)
   const conversations = useAtomValue(conversationsAtom)
   const agentSessions = useAtomValue(agentSessionsAtom)
   const sessionHoverPreviewEnabled = useAtomValue(sessionHoverPreviewEnabledAtom)
@@ -409,12 +409,12 @@ export function SearchDialog(): React.ReactElement {
     setActiveView('conversations')
 
     if (result.type === 'chat') {
-      setMessageSearchNavigation(null)
+      updateMessageSearchNavigation({ type: 'clear' })
       const conv = conversations.find((c) => c.id === result.id)
       const title = conv?.title ?? result.title
       openSession('chat', result.id, title)
     } else {
-      setMessageSearchNavigation(isContentResult(result)
+      const navigation = isContentResult(result)
         ? createProjectMessageSearchNavigation(isProjectSearch, {
           type: result.type,
           sessionId: result.id,
@@ -424,12 +424,15 @@ export function SearchDialog(): React.ReactElement {
           matchStart: result.matchStart,
           matchLength: result.matchLength,
         })
-        : null)
+        : null
+      updateMessageSearchNavigation(navigation
+        ? { type: 'request', navigation }
+        : { type: 'clear' })
       const session = agentSessions.find((s) => s.id === result.id)
       const title = session?.title ?? result.title
       openSession('agent', result.id, title)
     }
-  }, [setOpen, setSearchScope, setActiveView, setMessageSearchNavigation, openSession, conversations, agentSessions, committedQuery, isProjectSearch])
+  }, [setOpen, setSearchScope, setActiveView, updateMessageSearchNavigation, openSession, conversations, agentSessions, committedQuery, isProjectSearch])
 
   const handleOpenChange = React.useCallback((nextOpen: boolean): void => {
     setOpen(nextOpen)

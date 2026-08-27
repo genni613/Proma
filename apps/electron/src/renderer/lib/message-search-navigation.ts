@@ -32,6 +32,53 @@ export interface TextMatchRange {
   matchLength: number
 }
 
+export interface MessageSearchNavigationState {
+  pendingNavigation: MessageSearchNavigationRequest | null
+  activeHighlight: MessageSearchNavigationRequest | null
+}
+
+export type MessageSearchNavigationAction =
+  | { type: 'request'; navigation: MessageSearchNavigationRequest }
+  | { type: 'activate'; navigation: MessageSearchNavigationRequest }
+  | { type: 'clear' }
+  | { type: 'leave-session'; sessionId: string }
+
+export function createMessageSearchNavigationState(): MessageSearchNavigationState {
+  return { pendingNavigation: null, activeHighlight: null }
+}
+
+/** 区分“导航已消费”和“显式清除”，避免请求置空时误删刚创建的关键词高亮。 */
+export function reduceMessageSearchNavigationState(
+  state: MessageSearchNavigationState,
+  action: MessageSearchNavigationAction,
+): MessageSearchNavigationState {
+  if (action.type === 'request') {
+    return { ...state, pendingNavigation: action.navigation }
+  }
+  if (action.type === 'activate') {
+    return { pendingNavigation: null, activeHighlight: action.navigation }
+  }
+  if (action.type === 'clear') return createMessageSearchNavigationState()
+
+  const pendingNavigation = state.pendingNavigation?.sessionId === action.sessionId
+    ? null
+    : state.pendingNavigation
+  const activeHighlight = state.activeHighlight?.sessionId === action.sessionId
+    ? null
+    : state.activeHighlight
+  if (pendingNavigation === state.pendingNavigation && activeHighlight === state.activeHighlight) return state
+  return { pendingNavigation, activeHighlight }
+}
+
+/** CSS Highlight registry 为窗口全局资源，只有拥有导航/高亮的会话离开时才能删除。 */
+export function shouldClearMessageSearchHighlightOnSessionLeave(
+  state: MessageSearchNavigationState,
+  sessionId: string,
+): boolean {
+  return state.pendingNavigation?.sessionId === sessionId
+    || state.activeHighlight?.sessionId === sessionId
+}
+
 /** 仅项目内的 Agent 正文结果创建精确定位请求，避免扩大全局搜索行为。 */
 export function createProjectMessageSearchNavigation(
   isProjectSearch: boolean,

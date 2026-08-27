@@ -42,10 +42,14 @@ import type { AgentEventUsage, RetryAttempt, SDKAssistantMessage, SDKMessage, SD
 import { getSDKCompactStatus } from '@proma/shared'
 import { agentLiveMessagesAtomFamily, agentSessionStreamingStateAtomFamily, type AgentStreamState } from '@/atoms/agent-atoms'
 import type { QuotedSelection } from '@/atoms/preview-atoms'
-import { messageSearchNavigationAtom } from '@/atoms/search-atoms'
+import {
+  messageSearchNavigationStateAtom,
+  updateMessageSearchNavigationAtom,
+} from '@/atoms/search-atoms'
 import {
   resolveMessageSearchAnchorId,
   resolveMessageSearchTextRange,
+  shouldClearMessageSearchHighlightOnSessionLeave,
   type MessageSearchAnchor,
   type MessageSearchNavigationRequest,
 } from '@/lib/message-search-navigation'
@@ -258,6 +262,11 @@ interface CustomHighlightRegistry {
 
 type HighlightConstructor = new (...ranges: Range[]) => unknown
 
+interface NamedRangeHighlightResult {
+  applied: boolean
+  usesBrowserSelection: boolean
+}
+
 function getMessageTextPosition(messageElement: HTMLElement, offset: number): TextPosition | null {
   if (!Number.isInteger(offset) || offset < 0) return null
 
@@ -322,19 +331,24 @@ function getCustomHighlightRegistry(): CustomHighlightRegistry | undefined {
   return (globalThis.CSS as unknown as { highlights?: CustomHighlightRegistry }).highlights
 }
 
-function applyNamedRangeHighlight(range: Range, name: string, fallbackToSelection: boolean): boolean {
+function applyNamedRangeHighlight(
+  range: Range,
+  name: string,
+  fallbackToSelection: boolean,
+): NamedRangeHighlightResult {
   const registry = getCustomHighlightRegistry()
   const Highlight = (globalThis as unknown as { Highlight?: HighlightConstructor }).Highlight
   if (registry && Highlight) {
     registry.set(name, new Highlight(range))
-    return false
+    return { applied: true, usesBrowserSelection: false }
   }
 
-  if (!fallbackToSelection) return false
+  if (!fallbackToSelection) return { applied: false, usesBrowserSelection: false }
   const selection = window.getSelection()
-  selection?.removeAllRanges()
-  selection?.addRange(range)
-  return true
+  if (!selection) return { applied: false, usesBrowserSelection: false }
+  selection.removeAllRanges()
+  selection.addRange(range)
+  return { applied: true, usesBrowserSelection: true }
 }
 
 function getPersistedMessageIds(message: SDKMessage): string[] {
@@ -940,8 +954,11 @@ export const AgentMessages = React.memo(function AgentMessages({
   const userProfile = useAtomValue(userProfileAtom)
   const channels = useAtomValue(channelsAtom)
   const setMinimapCache = useSetAtom(tabMinimapCacheAtom)
-  const messageSearchNavigation = useAtomValue(messageSearchNavigationAtom)
-  const setMessageSearchNavigation = useSetAtom(messageSearchNavigationAtom)
+  const messageSearchNavigationState = useAtomValue(messageSearchNavigationStateAtom)
+  const updateMessageSearchNavigation = useSetAtom(updateMessageSearchNavigationAtom)
+  const messageSearchNavigation = messageSearchNavigationState.pendingNavigation
+  const messageSearchNavigationStateRef = React.useRef(messageSearchNavigationState)
+  messageSearchNavigationStateRef.current = messageSearchNavigationState
   const historySelectionRootRef = React.useRef<HTMLDivElement>(null)
   const historyRef = React.useRef<AgentTranscriptHistoryHandle>(null)
   const visibleGroupsRef = React.useRef<MessageGroup[]>([])
@@ -974,16 +991,28 @@ export const AgentMessages = React.memo(function AgentMessages({
     const clearOnPointerDown = (): void => {
       // 仅清理已存在的高亮；不读取 Selection 或触发历史渲染。
       clearHistoryQuoteHighlight()
-      clearMessageSearchHighlight()
     }
     // 保留根外点击的高亮清理；该监听不参与选区捕获热路径。
     document.addEventListener('pointerdown', clearOnPointerDown, true)
     return () => {
       document.removeEventListener('pointerdown', clearOnPointerDown, true)
       clearHistoryQuoteHighlight()
+    }
+  }, [clearHistoryQuoteHighlight])
+
+  // 搜索关键词高亮在导航请求消费后继续保留；离开当前会话时清理对应状态。
+  React.useEffect(() => () => {
+    if (shouldClearMessageSearchHighlightOnSessionLeave(messageSearchNavigationStateRef.current, sessionId)) {
       clearMessageSearchHighlight()
     }
-  }, [clearHistoryQuoteHighlight, clearMessageSearchHighlight])
+    updateMessageSearchNavigation({ type: 'leave-session', sessionId })
+  }, [clearMessageSearchHighlight, sessionId, updateMessageSearchNavigation])
+
+  // 标题结果、Chat 结果等显式清除搜索上下文时，即使仍停留在同一会话也移除高亮。
+  React.useEffect(() => {
+    if (messageSearchNavigationState.pendingNavigation || messageSearchNavigationState.activeHighlight) return
+    clearMessageSearchHighlight()
+  }, [clearMessageSearchHighlight, messageSearchNavigationState])
 
   React.useEffect(() => {
     clearHistoryQuoteHighlight()
@@ -1011,7 +1040,7 @@ export const AgentMessages = React.memo(function AgentMessages({
           range,
           AGENT_HISTORY_QUOTE_HIGHLIGHT_NAME,
           true,
-        )
+        ).usesBrowserSelection
       }
 
       const targetIndex = visibleGroupsRef.current.findIndex((group) => getGroupId(group) === messageId)
@@ -1030,16 +1059,10 @@ export const AgentMessages = React.memo(function AgentMessages({
   }, [clearHistoryQuoteHighlight, historyQuoteNavigation, sessionId])
 
   React.useEffect(() => {
-    clearMessageSearchHighlight()
-    if (
-      !ready
-      || !messageSearchNavigation
-      || messageSearchNavigation.sessionId !== sessionId
-    ) {
-      return
-    }
+    if (!ready || !messageSearchNavigation || messageSearchNavigation.sessionId !== sessionId) return
 
     const navigation = messageSearchNavigation
+    clearMessageSearchHighlight()
     const anchorId = resolveMessageSearchAnchorId(
       toMessageSearchAnchors(visibleGroupsRef.current),
       navigation.messageId,
@@ -1049,14 +1072,18 @@ export const AgentMessages = React.memo(function AgentMessages({
       const didNavigate = historyRef.current?.scrollToMessage(anchorId, (target) => {
         target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
         const range = getAgentMessageSearchRange(target, navigation)
-        if (range) applyNamedRangeHighlight(range, AGENT_MESSAGE_SEARCH_HIGHLIGHT_NAME, false)
-        setMessageSearchNavigation(null)
+        const highlight = range
+          ? applyNamedRangeHighlight(range, AGENT_MESSAGE_SEARCH_HIGHLIGHT_NAME, false)
+          : { applied: false, usesBrowserSelection: false }
+        updateMessageSearchNavigation(highlight.applied
+          ? { type: 'activate', navigation }
+          : { type: 'clear' })
       })
-      if (!didNavigate) setMessageSearchNavigation(null)
+      if (!didNavigate) updateMessageSearchNavigation({ type: 'clear' })
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [clearMessageSearchHighlight, messageSearchNavigation, ready, sessionId, setMessageSearchNavigation])
+  }, [clearMessageSearchHighlight, messageSearchNavigation, ready, sessionId, updateMessageSearchNavigation])
 
   // 实时文本仅从 liveMessages 读取。AgentStreamState 只保留运行/控制状态，
   // 避免每个 sdk_delta 同时更新 transcript 和 legacy content 两条路径。

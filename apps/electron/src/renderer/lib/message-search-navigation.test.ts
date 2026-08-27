@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import {
   createProjectMessageSearchNavigation,
+  createMessageSearchNavigationState,
+  reduceMessageSearchNavigationState,
   resolveMessageSearchAnchorId,
   resolveMessageSearchTextRange,
+  shouldClearMessageSearchHighlightOnSessionLeave,
 } from './message-search-navigation'
 
 describe('项目搜索结果消息定位', () => {
@@ -83,5 +86,71 @@ describe('项目搜索结果消息定位', () => {
       matchStart: 99,
       matchLength: 3,
     })).toBeNull()
+  })
+
+  test('Given 关键词高亮已经应用 When 导航请求被消费 Then 保留当前高亮上下文', () => {
+    const navigation = {
+      sessionId: 'session-1',
+      messageId: 'message-2',
+      query: '新关键词',
+      snippet: '命中新关键词',
+      matchStart: 2,
+      matchLength: 4,
+    }
+    const requested = reduceMessageSearchNavigationState(
+      createMessageSearchNavigationState(),
+      { type: 'request', navigation },
+    )
+
+    expect(reduceMessageSearchNavigationState(requested, {
+      type: 'activate',
+      navigation,
+    })).toEqual({
+      pendingNavigation: null,
+      activeHighlight: navigation,
+    })
+  })
+
+  test('Given 当前会话保留关键词高亮 When 显式清除或离开会话 Then 移除高亮上下文', () => {
+    const navigation = {
+      sessionId: 'session-1',
+      messageId: 'message-2',
+      query: '关键词',
+      snippet: '命中关键词',
+      matchStart: 2,
+      matchLength: 3,
+    }
+    const activeState = {
+      pendingNavigation: null,
+      activeHighlight: navigation,
+    }
+
+    expect(reduceMessageSearchNavigationState(activeState, { type: 'clear' }))
+      .toEqual(createMessageSearchNavigationState())
+    expect(reduceMessageSearchNavigationState(activeState, {
+      type: 'leave-session',
+      sessionId: 'session-1',
+    })).toEqual(createMessageSearchNavigationState())
+  })
+
+  test('Given 当前高亮来自其他会话 When 非目标会话卸载 Then 不清除目标高亮', () => {
+    const activeState = {
+      pendingNavigation: null,
+      activeHighlight: {
+        sessionId: 'session-2',
+        messageId: 'message-2',
+        query: '关键词',
+        snippet: '命中关键词',
+        matchStart: 2,
+        matchLength: 3,
+      },
+    }
+
+    expect(reduceMessageSearchNavigationState(activeState, {
+      type: 'leave-session',
+      sessionId: 'session-1',
+    })).toEqual(activeState)
+    expect(shouldClearMessageSearchHighlightOnSessionLeave(activeState, 'session-1')).toBe(false)
+    expect(shouldClearMessageSearchHighlightOnSessionLeave(activeState, 'session-2')).toBe(true)
   })
 })
