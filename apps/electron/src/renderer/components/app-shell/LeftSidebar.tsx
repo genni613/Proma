@@ -106,6 +106,10 @@ import {
   type SessionMiniMapType,
 } from '@/components/session-preview/SessionMiniMapPopover'
 import { detectIsMac } from '@/lib/platform'
+import {
+  consumeProjectSearchMenuCloseAutoFocus,
+  scheduleProjectSearchOpen,
+} from '@/lib/project-search-menu-action'
 import { ShortcutKeycaps } from '@/components/shortcuts/ShortcutKeycaps'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import {
@@ -4629,6 +4633,7 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   const [workspaceEditName, setWorkspaceEditName] = React.useState('')
   const workspaceEditRef = React.useRef<HTMLInputElement>(null)
   const justStartedRenamingRef = React.useRef(false)
+  const pendingProjectSearchRef = React.useRef(false)
 
   const handleStartWorkspaceRename = (): void => {
     setWorkspaceEditName(group.workspace.name)
@@ -4804,7 +4809,13 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               <MoreHorizontal size={13} />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-44 z-[9999] min-w-0 p-0.5">
+          <DropdownMenuContent
+            align="start"
+            className="w-44 z-[9999] min-w-0 p-0.5"
+            onCloseAutoFocus={(event) => {
+              consumeProjectSearchMenuCloseAutoFocus(pendingProjectSearchRef, event)
+            }}
+          >
             <DropdownMenuItem
               className="text-xs py-1 [&>svg]:size-3.5"
               onSelect={() => onSelectProject(group.workspace.id)}
@@ -4821,7 +4832,14 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-xs py-1 [&>svg]:size-3.5"
-              onSelect={() => onSearchProject(group.workspace.id, group.workspace.name)}
+              onSelect={() => {
+                pendingProjectSearchRef.current = true
+                scheduleProjectSearchOpen(
+                  onSearchProject,
+                  group.workspace.id,
+                  group.workspace.name,
+                )
+              }}
             >
               <Search size={14} />
               在项目中搜索

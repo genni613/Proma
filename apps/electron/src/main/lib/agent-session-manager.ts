@@ -39,6 +39,7 @@ import type {
   ForkSessionInput,
   AgentMessageSearchResult,
   AgentMessageSearchOptions,
+  SearchMatchKind,
   AgentSessionReferenceSearchInput,
   AgentSessionReferenceSearchResult,
   AgentCwdMode,
@@ -1312,12 +1313,12 @@ export async function searchAgentSessionMessages(
   if (!query || query.length < 2) return []
 
   const index = readIndex()
-  const results: AgentMessageSearchResult[] = []
+  const rankedResults: RankedAgentMessageSearchResult[] = []
   let matchedSessionCount = 0
 
   const sortedSessions = index.sessions
     .filter((session) => !options.workspaceId || session.workspaceId === options.workspaceId)
-    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .sort((a, b) => compareArchivedState(a.archived, b.archived) || b.updatedAt - a.updatedAt)
   for (const session of sortedSessions) {
     if (!options.workspaceId && matchedSessionCount >= MAX_SEARCH_SESSIONS) break
 
@@ -1329,20 +1330,45 @@ export async function searchAgentSessionMessages(
     matchedSessionCount++
 
     for (const hit of hits.slice(0, MAX_SEARCH_HITS_PER_SESSION)) {
-      results.push({
-        sessionId: session.id,
-        sessionTitle: session.title,
-        messageId: hit.messageId,
-        role: hit.role,
-        snippet: hit.snippet,
-        matchStart: hit.matchStart,
-        matchLength: hit.matchLength,
-        archived: session.archived,
+      rankedResults.push({
+        result: {
+          sessionId: session.id,
+          sessionTitle: session.title,
+          messageId: hit.messageId,
+          role: hit.role,
+          snippet: hit.snippet,
+          matchStart: hit.matchStart,
+          matchLength: hit.matchLength,
+          archived: session.archived,
+        },
+        matchKind: hit.kind,
+        score: hit.score,
+        sessionUpdatedAt: session.updatedAt,
       })
     }
   }
 
-  return results
+  rankedResults.sort((a, b) => {
+    const archiveOrder = compareArchivedState(a.result.archived, b.result.archived)
+    if (archiveOrder !== 0) return archiveOrder
+
+    const exactOrder = Number(b.matchKind === 'exact') - Number(a.matchKind === 'exact')
+    if (exactOrder !== 0) return exactOrder
+
+    return b.sessionUpdatedAt - a.sessionUpdatedAt || b.score - a.score
+  })
+  return rankedResults.map(({ result }) => result)
+}
+
+interface RankedAgentMessageSearchResult {
+  result: AgentMessageSearchResult
+  matchKind: SearchMatchKind
+  score: number
+  sessionUpdatedAt: number
+}
+
+function compareArchivedState(left?: boolean, right?: boolean): number {
+  return Number(Boolean(left)) - Number(Boolean(right))
 }
 
 interface AgentSearchHit {
@@ -1351,6 +1377,7 @@ interface AgentSearchHit {
   snippet: string
   matchStart: number
   matchLength: number
+  kind: SearchMatchKind
   score: number
 }
 
@@ -1414,7 +1441,15 @@ async function findMatchesInAgentJsonl(
         textContent.slice(snippetStart, snippetEnd) +
         (snippetEnd < textContent.length ? '...' : '')
       const matchStart = match.matchStart - snippetStart + (snippetStart > 0 ? 3 : 0)
-      const hit = { messageId, role, snippet, matchStart, matchLength: match.matchLength, score: match.score }
+      const hit = {
+        messageId,
+        role,
+        snippet,
+        matchStart,
+        matchLength: match.matchLength,
+        kind: match.kind,
+        score: match.score,
+      }
       if (messageId) {
         const existingHit = hitsByMessageId.get(messageId)
         if (!existingHit) {

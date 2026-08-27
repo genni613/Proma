@@ -80,6 +80,7 @@ function writeAgentSessionsIndex(sessions: Array<{
   workspaceId: string
   createdAt: number
   updatedAt: number
+  archived?: boolean
   agentRuntime?: string
   sdkSessionId?: string
   piSessionFile?: string
@@ -292,6 +293,87 @@ describe('Agent 会话 runtime 元数据', () => {
 })
 
 describe('Agent 会话正文搜索', () => {
+  test('Given 活跃与归档会话包含完整和模糊命中 When 搜索项目 Then 按活跃状态和匹配质量分级排序', async () => {
+    writeAgentSessionsIndex([
+      {
+        id: 'active-exact',
+        title: '活跃完整命中',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 10,
+      },
+      {
+        id: 'active-exact-newer',
+        title: '较新活跃完整命中',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 30,
+      },
+      {
+        id: 'active-fuzzy',
+        title: '活跃模糊命中',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 40,
+      },
+      {
+        id: 'archived-exact',
+        title: '归档完整命中',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 20,
+        archived: true,
+      },
+      {
+        id: 'archived-fuzzy',
+        title: '归档模糊命中',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 50,
+        archived: true,
+      },
+      {
+        id: 'archived-fuzzy-older',
+        title: '较旧归档模糊命中',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 5,
+        archived: true,
+      },
+    ])
+    writeAgentSessionJsonl('active-exact', [
+      JSON.stringify({ type: 'user', uuid: 'active-exact-message', message: { content: [{ type: 'text', text: 'planning' }] } }),
+    ])
+    writeAgentSessionJsonl('active-fuzzy', [
+      JSON.stringify({ type: 'user', uuid: 'active-fuzzy-message', message: { content: [{ type: 'text', text: 'pong' }] } }),
+    ])
+    writeAgentSessionJsonl('active-exact-newer', [
+      JSON.stringify({ type: 'user', uuid: 'active-exact-newer-message', message: { content: [{ type: 'text', text: 'shipping' }] } }),
+    ])
+    writeAgentSessionJsonl('archived-exact', [
+      JSON.stringify({ type: 'user', uuid: 'archived-exact-message', message: { content: [{ type: 'text', text: 'ing' }] } }),
+    ])
+    writeAgentSessionJsonl('archived-fuzzy', [
+      JSON.stringify({ type: 'user', uuid: 'archived-fuzzy-message', message: { content: [{ type: 'text', text: 'pong' }] } }),
+    ])
+    writeAgentSessionJsonl('archived-fuzzy-older', [
+      JSON.stringify({ type: 'user', uuid: 'archived-fuzzy-older-message', message: { content: [{ type: 'text', text: 'pong' }] } }),
+    ])
+
+    const results = await manager.searchAgentSessionMessages('ing', {
+      workspaceId: 'workspace-a',
+    })
+
+    expect(results.map((result) => result.sessionId)).toEqual([
+      'active-exact-newer',
+      'active-exact',
+      'active-fuzzy',
+      'archived-exact',
+      'archived-fuzzy',
+      'archived-fuzzy-older',
+    ])
+  })
+
   test('Given 两个项目都有匹配消息 When 搜索指定项目 Then 只返回该项目下的 Session', async () => {
     writeAgentSessionsIndex([
       {
