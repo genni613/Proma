@@ -15,6 +15,7 @@ import { AlertTriangle, Loader2, Search } from 'lucide-react'
 import { useStickToBottomContext } from 'use-stick-to-bottom'
 import { Input } from '@/components/ui/input'
 import { UserAvatar } from '@/components/chat/UserAvatar'
+import { SearchMatchHighlight } from '@/components/app-shell/SearchMatchHighlight'
 import { getModelLogo, resolveModelProvider } from '@/lib/model-logo'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { useShortcut } from '@/hooks/useShortcut'
@@ -704,7 +705,7 @@ function HighlightedPreview({ text, query }: { text: string; query: string }): R
       <span className="text-xs text-popover-foreground/80 line-clamp-3">
         {parts.map((part, i) =>
           part.toLowerCase() === normalizedQuery.toLowerCase()
-            ? <mark key={i} className="bg-primary/20 text-primary rounded-sm px-0.5">{part}</mark>
+            ? <SearchMatchHighlight key={i} before="" match={part} after="" />
             : part
         )}
       </span>

@@ -20,6 +20,7 @@ import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Search, X, MessageSquare, Bot, Archive, Loader2 } from 'lucide-react'
 import { Dialog, DialogContent, DialogPortal, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { SearchMatchHighlight } from './SearchMatchHighlight'
 import { searchDialogOpenAtom } from '@/atoms/search-atoms'
 import { conversationsAtom, channelsAtom } from '@/atoms/chat-atoms'
 import {
@@ -79,13 +80,7 @@ function HighlightText({ text, query }: { text: string; query: string }): React.
   const matchedText = text.slice(match.matchStart, match.matchStart + match.matchLength)
   const after = text.slice(match.matchStart + match.matchLength)
 
-  return (
-    <>
-      {before}
-      <mark className="bg-primary/20 text-foreground rounded-sm px-0.5">{matchedText}</mark>
-      {after}
-    </>
-  )
+  return <SearchMatchHighlight before={before} match={matchedText} after={after} />
 }
 
 /** 高亮 snippet 中的匹配部分（使用预计算位置） */
@@ -100,13 +95,7 @@ function HighlightSnippet({ snippet, matchStart, matchLength }: {
   const match = snippet.slice(matchStart, matchStart + matchLength)
   const after = snippet.slice(matchStart + matchLength)
 
-  return (
-    <>
-      {before}
-      <mark className="bg-primary/20 text-foreground rounded-sm px-0.5">{match}</mark>
-      {after}
-    </>
-  )
+  return <SearchMatchHighlight before={before} match={match} after={after} />
 }
 
 function SearchResultIcon({ result }: { result: SearchResult }): React.ReactElement {
