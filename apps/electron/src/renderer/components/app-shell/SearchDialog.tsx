@@ -92,11 +92,10 @@ function HighlightText({ text, query }: { text: string; query: string }): React.
 }
 
 /** 高亮 snippet 中的匹配部分（使用预计算位置） */
-function HighlightSnippet({ snippet, matchStart, matchLength, projectSearch }: {
+function HighlightSnippet({ snippet, matchStart, matchLength }: {
   snippet: string
   matchStart: number
   matchLength: number
-  projectSearch: boolean
 }): React.ReactElement {
   if (matchStart < 0 || matchStart >= snippet.length) return <>{snippet}</>
 
@@ -105,12 +104,7 @@ function HighlightSnippet({ snippet, matchStart, matchLength, projectSearch }: {
   const after = snippet.slice(matchStart + matchLength)
 
   return (
-    <SearchMatchHighlight
-      before={before}
-      match={match}
-      after={after}
-      projectSearch={projectSearch}
-    />
+    <SearchMatchHighlight before={before} match={match} after={after} />
   )
 }
 
@@ -127,7 +121,6 @@ interface SearchResultRowProps {
   index: number
   isSelected: boolean
   committedQuery: string
-  isProjectSearch: boolean
   miniMapDisabled?: boolean
   getAgentWorkspaceName: (sessionId: string) => string | undefined
   onSelect: (result: SearchResult) => void
@@ -139,7 +132,6 @@ function SearchResultRow({
   index,
   isSelected,
   committedQuery,
-  isProjectSearch,
   miniMapDisabled,
   getAgentWorkspaceName,
   onSelect,
@@ -189,7 +181,6 @@ function SearchResultRow({
               snippet={result.snippet}
               matchStart={result.matchStart}
               matchLength={result.matchLength}
-              projectSearch={isProjectSearch}
             />
           </div>
         )}
@@ -630,7 +621,6 @@ export function SearchDialog(): React.ReactElement {
                   index={idx}
                   isSelected={selectedIndex === idx}
                   committedQuery={committedQuery}
-                  isProjectSearch={isProjectSearch}
                   miniMapDisabled={!sessionHoverPreviewEnabled}
                   getAgentWorkspaceName={getAgentWorkspaceName}
                   onSelect={navigateToResult}
@@ -654,7 +644,6 @@ export function SearchDialog(): React.ReactElement {
                   index={titleResults.length + i}
                   isSelected={selectedIndex === titleResults.length + i}
                   committedQuery={committedQuery}
-                  isProjectSearch={isProjectSearch}
                   miniMapDisabled={!sessionHoverPreviewEnabled}
                   getAgentWorkspaceName={getAgentWorkspaceName}
                   onSelect={navigateToResult}
