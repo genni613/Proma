@@ -37,6 +37,7 @@ import type {
   SkillActivation,
   AgentWorkspace,
   ForkSessionInput,
+  AgentMessageSearchOptions,
   AgentMessageSearchResult,
   AgentSessionReferenceSearchInput,
   AgentSessionReferenceSearchResult,
@@ -1303,14 +1304,20 @@ export function cleanupStaleAttachedPaths(): number {
  * 搜索 Agent 会话正文。
  * 每个会话最多返回 2 个用户/助手正文命中，最多返回 100 个命中会话。
  */
-export async function searchAgentSessionMessages(query: string): Promise<AgentMessageSearchResult[]> {
+export async function searchAgentSessionMessages(
+  query: string,
+  options?: AgentMessageSearchOptions,
+): Promise<AgentMessageSearchResult[]> {
   if (!query || query.length < 2) return []
 
   const index = readIndex()
   const results: AgentMessageSearchResult[] = []
   let matchedSessionCount = 0
+  const workspaceIds = new Set(options?.workspaceIds?.filter(Boolean) ?? [])
 
-  const sortedSessions = [...index.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  const sortedSessions = [...index.sessions]
+    .filter((session) => workspaceIds.size === 0 || (session.workspaceId && workspaceIds.has(session.workspaceId)))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
   for (const session of sortedSessions) {
     if (matchedSessionCount >= MAX_SEARCH_SESSIONS) break
 
@@ -1331,6 +1338,7 @@ export async function searchAgentSessionMessages(query: string): Promise<AgentMe
         matchStart: hit.matchStart,
         matchLength: hit.matchLength,
         archived: session.archived,
+        updatedAt: session.updatedAt,
       })
     }
   }

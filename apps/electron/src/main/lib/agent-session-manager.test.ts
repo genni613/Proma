@@ -292,6 +292,26 @@ describe('Agent 会话 runtime 元数据', () => {
 })
 
 describe('Agent 会话正文搜索', () => {
+  test('Given 多个项目中都有命中 When 指定多个项目搜索 Then 只返回所选项目并保留更新时间', async () => {
+    writeAgentSessionsIndex([
+      { id: 'session-a', title: '项目 A', workspaceId: 'workspace-a', createdAt: 1, updatedAt: 10 },
+      { id: 'session-b', title: '项目 B', workspaceId: 'workspace-b', createdAt: 2, updatedAt: 30 },
+      { id: 'session-c', title: '项目 C', workspaceId: 'workspace-c', createdAt: 3, updatedAt: 50 },
+    ])
+    for (const sessionId of ['session-a', 'session-b', 'session-c']) {
+      writeAgentSessionJsonl(sessionId, [
+        JSON.stringify({ type: 'user', uuid: `${sessionId}-message`, message: { content: [{ type: 'text', text: '范围搜索命中词' }] } }),
+      ])
+    }
+
+    const results = await manager.searchAgentSessionMessages('命中词', {
+      workspaceIds: ['workspace-a', 'workspace-b'],
+    })
+
+    expect(results.map((result) => result.sessionId)).toEqual(['session-b', 'session-a'])
+    expect(results.map((result) => result.updatedAt)).toEqual([30, 10])
+  })
+
   test('Given 用户/助手正文和内部块 When 搜索 Then 只返回最多两个不同正文消息命中', async () => {
     writeAgentSessionsIndex([{
       id: 'search-content-session',

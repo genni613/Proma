@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+::highlight(proma-message-search) {
+  background-color: hsl(var(--primary) / 0.28);
+  color: inherit;
+}
+
 /* ===== 全局字体与渲染优化 =====
  * 优先 Inter Variable（自托管，见 main.tsx 引入） → SF Pro Text（macOS 系统） → system-ui；
  * 数字使用 tabular-nums，配合 cv11/ss01/ss03 让字形接近 Vercel / Linear 的现代感。

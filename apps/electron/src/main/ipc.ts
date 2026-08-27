@@ -94,6 +94,7 @@ import type {
   RewindSessionInput,
   RewindSessionResult,
   AgentSessionReferenceSearchInput,
+  AgentMessageSearchOptions,
   FeishuConfigInput,
   FeishuConfig,
   FeishuBridgeState,
@@ -2380,8 +2381,8 @@ export function registerIpcHandlers(): void {
   // 搜索 Agent 会话消息内容
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SEARCH_MESSAGES,
-    async (_, query: string) => {
-      return searchAgentSessionMessages(query)
+    async (_, query: string, options?: AgentMessageSearchOptions) => {
+      return searchAgentSessionMessages(query, options)
     }
   )
 
