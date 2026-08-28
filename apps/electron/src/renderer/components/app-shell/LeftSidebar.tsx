@@ -73,7 +73,13 @@ import {
   automationGroupOrderAtom,
 } from '@/atoms/agent-atoms'
 import type { SessionIndicatorStatus, WorkspaceComponentTab } from '@/atoms/agent-atoms'
-import { previewPanelOpenMapAtom, previewFileMapAtom, previewFilesMapAtom } from '@/atoms/preview-atoms'
+import {
+  previewPanelOpenMapAtom,
+  previewFileMapAtom,
+  previewFilesMapAtom,
+  previewContentRefreshVersionAtom,
+  previewResolvedPathAtom,
+} from '@/atoms/preview-atoms'
 import { clearPreviewCacheForSession } from '@/components/diff/DiffTabContent'
 import {
   tabsAtom,
@@ -96,6 +102,7 @@ import { useOpenSession } from '@/hooks/useOpenSession'
 import { useSyncActiveTabSideEffects } from '@/hooks/useSyncActiveTabSideEffects'
 import { sessionHoverPreviewEnabledAtom } from '@/atoms/ui-preferences'
 import { CollapsedWorkspacePopover } from '@/components/agent/CollapsedWorkspacePopover'
+import { ObsidianIcon } from '@/components/obsidian/obsidian-brand'
 import { VirtualSidebarList, type VirtualSidebarRow } from '@/components/ui/virtual-sidebar-list'
 import { LocalProjectBadge } from '@/components/agent/LocalProjectBadge'
 import { MoveSessionDialog } from '@/components/agent/MoveSessionDialog'
@@ -243,11 +250,11 @@ function WorkspaceComponentSidebarEntry({ label, icon, active, onClick, badge }:
         'group flex w-full items-center justify-between rounded-md px-3 py-2 text-[13px] transition-colors duration-100 titlebar-no-drag',
         active
           ? 'bg-accent-foreground/[0.10] text-foreground shadow-[0_1px_2px_0_rgba(0,0,0,0.05)]'
-          : 'text-foreground/60 hover:bg-accent-foreground/[0.08] hover:text-foreground',
+          : 'text-foreground/75 hover:bg-accent-foreground/[0.08] hover:text-foreground',
       )}
     >
       <span className="flex min-w-0 items-center gap-3">
-        <span className={cn('flex size-[18px] shrink-0 items-center justify-center', active ? 'text-accent-foreground' : 'text-foreground/45')}>
+        <span className={cn('flex size-[18px] shrink-0 items-center justify-center', active ? 'text-accent-foreground' : 'text-foreground/60')}>
           {icon}
         </span>
         <span className="truncate">{label}</span>
@@ -855,6 +862,8 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
   const setPreviewPanelOpen = useSetAtom(previewPanelOpenMapAtom)
   const setPreviewFile = useSetAtom(previewFileMapAtom)
   const setPreviewFiles = useSetAtom(previewFilesMapAtom)
+  const setPreviewContentRefreshVersion = useSetAtom(previewContentRefreshVersionAtom)
+  const setPreviewResolvedPaths = useSetAtom(previewResolvedPathAtom)
   const setAgentSideChatMap = useSetAtom(agentSideChatMapAtom)
   const setDiffPanelTab = useSetAtom(agentDiffPanelTabAtom)
   const setDiffRefreshVersion = useSetAtom(agentDiffRefreshVersionAtom)
@@ -885,6 +894,16 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     setPreviewPanelOpen(deleteKey)
     setPreviewFile(deleteKey)
     setPreviewFiles(deleteKey)
+    const deletePreviewSessionEntries = <T,>(prev: Map<string, T>): Map<string, T> => {
+      const prefix = `${id}\u0000`
+      const keys = [...prev.keys()].filter((key) => key.startsWith(prefix))
+      if (keys.length === 0) return prev
+      const next = new Map(prev)
+      for (const key of keys) next.delete(key)
+      return next
+    }
+    setPreviewContentRefreshVersion(deletePreviewSessionEntries)
+    setPreviewResolvedPaths(deletePreviewSessionEntries)
     setAgentSideChatMap((prev) => {
       let changed = false
       const map = new Map(prev)
@@ -959,7 +978,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     sessionExistsAtom.remove(id)
 
     clearPreviewCacheForSession(id)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setDiffPanelTab, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setNonGitFileChanges, setFileChangesCurrentRun, setDiffData, setAgentSidePanelOpenMap, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setSessionPendingFiles, store])
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setPreviewFiles, setPreviewContentRefreshVersion, setPreviewResolvedPaths, setDiffPanelTab, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setNonGitFileChanges, setFileChangesCurrentRun, setDiffData, setAgentSidePanelOpenMap, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setSessionPendingFiles, store])
 
   const currentWorkspaceSlug = React.useMemo(() => {
     if (!currentWorkspaceId) return null
@@ -1088,6 +1107,16 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     setActiveView('conversations')
     openWorkspaceComponent(component)
   }, [currentAgentSessionId, mode, openWorkspaceComponent, setAutomationForm, setActiveView, setPlanningTab])
+
+  /** Obsidian 在 Chat 中占用主内容区，在有 Agent 会话时复用右侧项目级工作区。 */
+  const handleOpenVault = React.useCallback((): void => {
+    if (mode !== 'agent' || !currentAgentSessionId) {
+      setActiveView('vault')
+      return
+    }
+    setActiveView('conversations')
+    openWorkspaceComponent('vault')
+  }, [currentAgentSessionId, mode, openWorkspaceComponent, setActiveView])
 
   const handleOpenCapabilityComponent = React.useCallback((component: 'skills' | 'mcp' | 'memory'): void => {
     if (mode !== 'agent' || !currentAgentSessionId) {
@@ -3160,6 +3189,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
       "skills",
       "mcp",
       "memory",
+      "vault",
     ].some((component) =>
       isWorkspaceComponentActive(component as WorkspaceComponentTab),
     );
@@ -3374,6 +3404,14 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
                 日程
               </DropdownMenuItem>
               <DropdownMenuItem
+                aria-current={isWorkspaceComponentActive("vault") ? "page" : undefined}
+                className={cn(isWorkspaceComponentActive("vault") && "bg-accent/70 text-accent-foreground")}
+                onSelect={handleOpenVault}
+              >
+                <ObsidianIcon size={16} />
+                Obsidian
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 aria-current={isWorkspaceComponentActive("automations") ? "page" : undefined}
                 className={cn(isWorkspaceComponentActive("automations") && "bg-accent/70 text-accent-foreground")}
                 onSelect={() => handleOpenPlanningComponent("automations")}
@@ -3548,6 +3586,12 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           active={isWorkspaceComponentActive('calendar')}
           onClick={() => handleOpenPlanningComponent('calendar')}
         />
+        <WorkspaceComponentSidebarEntry
+          label="Obsidian"
+          icon={<ObsidianIcon size={16} />}
+          active={mode === 'chat' ? activeView === 'vault' : isWorkspaceComponentActive('vault')}
+          onClick={handleOpenVault}
+        />
       </div>
 
       {mode === 'agent' && (
@@ -3571,7 +3615,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               'flex h-5 min-w-[22px] items-center justify-center rounded-full px-1.5 text-[11px] font-medium tabular-nums',
               isWorkspaceComponentActive('automations')
                 ? 'bg-accent-foreground/[0.26] text-primary-foreground'
-                : 'bg-foreground/[0.045] text-foreground/[0.42] group-hover:text-foreground/65',
+                : 'bg-foreground/[0.045] text-foreground/60 group-hover:text-foreground/75',
             )}>{formatAutomationCount(automationCount)}</span>
           ) : undefined}
         />

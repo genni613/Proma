@@ -7,7 +7,7 @@
 
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { X, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, GitBranch, GitMerge, MessageSquarePlus, FileDiff, FileText, FolderOpen, Globe, MessageCircle, Brain, Split, Blocks, CalendarDays, ListTodo, Clock, ServerCog, SquareTerminal } from 'lucide-react'
+import { X, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, GitBranch, GitMerge, MessageSquarePlus, FileDiff, FileText, FolderOpen, Globe, MessageCircle, Brain, Split, Blocks, CalendarDays, ListTodo, Clock, ServerCog, SquareTerminal, Terminal } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -25,6 +25,8 @@ import type { RightWorkspaceTabDragState, WorkspacePanelTab } from '@/components
 import { DiffChangesList } from '@/components/diff/DiffChangesList'
 import { ChatView } from '@/components/chat/ChatView'
 import { AgentView } from '@/components/agent/AgentView'
+import { VaultView } from '@/components/vault/VaultView'
+import { OBSIDIAN_NAME, ObsidianIcon } from '@/components/obsidian/obsidian-brand'
 import {
   currentSessionSidePanelOpenAtom,
   agentFileSourceFilterMapAtom,
@@ -89,7 +91,14 @@ import {
   browserStateMapAtom,
 } from '@/atoms/browser-atoms'
 import { BrowserPanel } from '@/components/browser/BrowserPanel'
-import { getPreviewFileId, previewFileMapAtom, previewFilesMapAtom, previewPanelOpenMapAtom } from '@/atoms/preview-atoms'
+import {
+  getPreviewFileId,
+  previewContentRefreshVersionAtom,
+  previewResolvedPathAtom,
+  previewFileMapAtom,
+  previewFilesMapAtom,
+  previewPanelOpenMapAtom,
+} from '@/atoms/preview-atoms'
 import { PreviewPanel } from '@/components/diff/PreviewPanel'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import type { FileEntry, AgentPendingFile, AgentSessionMeta, SDKMessage, WorktreeInfo } from '@proma/shared'
@@ -115,6 +124,14 @@ import {
   selectRightWorkspaceSplitTab,
 } from '@/lib/right-workspace-split'
 import type { RightWorkspacePane, RightWorkspaceSplitState } from '@/lib/right-workspace-split'
+
+function BrowserTabIcon({ favicon }: { favicon?: string }): React.ReactElement {
+  const [loadFailed, setLoadFailed] = React.useState(false)
+  React.useEffect(() => setLoadFailed(false), [favicon])
+
+  if (!favicon || loadFailed) return <Globe className="size-3.5" />
+  return <img src={favicon} alt="" aria-hidden="true" referrerPolicy="no-referrer" className="size-3.5 shrink-0 rounded-sm object-contain" onError={() => setLoadFailed(true)} />
+}
 
 function MeasuredWorkspacePane({ children }: { children: (width: number) => React.ReactNode }): React.ReactElement {
   const ref = React.useRef<HTMLDivElement>(null)
@@ -449,6 +466,8 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   const setPreviewFileMap = useSetAtom(previewFileMapAtom)
   const previewFilesMap = useAtomValue(previewFilesMapAtom)
   const setPreviewFilesMap = useSetAtom(previewFilesMapAtom)
+  const setPreviewContentRefreshVersion = useSetAtom(previewContentRefreshVersionAtom)
+  const setPreviewResolvedPaths = useSetAtom(previewResolvedPathAtom)
   const previewOpenMap = useAtomValue(previewPanelOpenMapAtom)
   const setPreviewOpenMap = useSetAtom(previewPanelOpenMapAtom)
   const previewFiles = previewFilesMap.get(sessionId) ?? []
@@ -894,13 +913,32 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
       return next
     })
     const fallback = remaining.at(-1) ?? null
+    setPreviewContentRefreshVersion((previous) => {
+      const key = `${sessionId}\u0000${previewId}`
+      if (!previous.has(key)) return previous
+      const next = new Map(previous)
+      next.delete(key)
+      return next
+    })
+    setPreviewFileMap((previous) => {
+      const next = new Map(previous)
+      next.set(sessionId, fallback)
+      return next
+    })
+    setPreviewResolvedPaths((previous) => {
+      const key = `${sessionId}\u0000${previewId}`
+      if (!previous.has(key)) return previous
+      const next = new Map(previous)
+      next.delete(key)
+      return next
+    })
     setPreviewOpenMap((previous) => {
       const next = new Map(previous)
       next.set(sessionId, fallback !== null)
       return next
     })
     if (getPreviewIdFromSidePanelTab(activeTab) === previewId) returnToPreviousTabAfterClose(getPreviewSidePanelTab(previewId))
-  }, [activeTab, previewFiles, returnToPreviousTabAfterClose, sessionId, setPreviewFilesMap, setPreviewOpenMap])
+  }, [activeTab, previewFiles, returnToPreviousTabAfterClose, sessionId, setPreviewContentRefreshVersion, setPreviewFileMap, setPreviewFilesMap, setPreviewOpenMap, setPreviewResolvedPaths])
 
   const handleCloseChatTab = React.useCallback(() => {
     setSideChatMap((prev) => {
@@ -1202,6 +1240,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
         skills: { label: 'Skills', icon: <Blocks className="size-3.5" /> },
         mcp: { label: 'MCP', icon: <ServerCog className="size-3.5" /> },
         memory: { label: '项目记忆', icon: <Brain className="size-3.5" /> },
+        vault: { label: OBSIDIAN_NAME, icon: <ObsidianIcon className="size-3.5" /> },
       }
       return { id: component, ...meta[component], closable: true }
     }),
@@ -1238,7 +1277,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     ...(browserState?.tabs.map((tab) => ({
       id: getBrowserSidePanelTab(tab.tabId),
       label: tab.title || '新建标签页',
-      icon: <Globe className="size-3.5" />,
+      icon: <BrowserTabIcon favicon={tab.favicon} />,
       // 用户可关闭任何浏览器标签；关闭 Agent 工作标签后，后续未指定 tabId 的工具会提示新建或选择工作标签。
       closable: true,
       activity: showBrowserActivity && activeBrowserTabId !== tab.tabId && browserState.activeTabId === tab.tabId,
@@ -1541,11 +1580,13 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     ) : paneTab === 'memory' ? (
       workspaceSlug ? (
         <div className="min-h-0 flex-1 overflow-hidden p-2">
-          <WorkspaceMemoryTab workspaceSlug={workspaceSlug} sessionId={sessionId} embedded />
+          <WorkspaceMemoryTab workspaceSlug={workspaceSlug} sessionId={sessionId} embedded onCloseChangeView={() => handleCloseWorkspaceTab('memory')} />
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">等待项目初始化...</div>
       )
+    ) : paneTab === 'vault' ? (
+      <div className="min-h-0 flex-1 overflow-hidden"><VaultView embedded sessionId={sessionId} /></div>
     ) : paneTab === 'changes' ? (
       sessionPath ? (
         <DiffChangesList
@@ -1631,20 +1672,20 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
                   <AttachedFilesSection scope="project" attachedFiles={wsAttachedFiles} onDetach={handleDetachWorkspaceFile} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} allowedPaths={basePathsRef.current} sessionId={sessionId} />
                 )}
                 {showProjectFiles && wsAttachedDirs.length > 0 && (
-                  <AttachedDirsSection scope="project" attachedDirs={wsAttachedDirs} onDetach={handleDetachWorkspaceDirectory} refreshVersion={filesVersion} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} allowedPaths={basePathsRef.current} sessionId={sessionId} />
+                  <AttachedDirsSection scope="project" attachedDirs={wsAttachedDirs} onDetach={handleDetachWorkspaceDirectory} refreshVersion={filesVersion} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} onOpenDirectoryTerminal={handleOpenDirectoryTerminal} allowedPaths={basePathsRef.current} sessionId={sessionId} />
                 )}
                 {showSessionFiles && attachedFiles.length > 0 && (
                   <AttachedFilesSection scope="session" showSessionBadge={false} attachedFiles={attachedFiles} onDetach={handleDetachFile} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} allowedPaths={basePathsRef.current} sessionId={sessionId} />
                 )}
                 {showSessionFiles && attachedDirs.length > 0 && (
-                  <AttachedDirsSection scope="session" showSessionBadge={false} attachedDirs={attachedDirs} onDetach={handleDetachDirectory} refreshVersion={filesVersion} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} allowedPaths={basePathsRef.current} sessionId={sessionId} />
+                  <AttachedDirsSection scope="session" showSessionBadge={false} attachedDirs={attachedDirs} onDetach={handleDetachDirectory} refreshVersion={filesVersion} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} onOpenDirectoryTerminal={handleOpenDirectoryTerminal} allowedPaths={basePathsRef.current} sessionId={sessionId} />
                 )}
                 {showProjectFiles && isProjectRootUnavailable && (
                   <div className="mx-2 my-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                     本地项目根目录不可用；当前会话文件仍可访问。
                   </div>
                 )}
-                <FileBrowser roots={visibleFileRoots} access={fileAccess} projectRootPath={isProjectRootUnavailable ? null : workspaceFilesPath} showSessionBadge={false} hideToolbar embedded hideEmpty={hasVisibleSessionAttachedItems || hasVisibleWorkspaceAttachedItems} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} />
+                <FileBrowser roots={visibleFileRoots} access={fileAccess} projectRootPath={isProjectRootUnavailable ? null : workspaceFilesPath} showSessionBadge={false} hideToolbar embedded hideEmpty={hasVisibleSessionAttachedItems || hasVisibleWorkspaceAttachedItems} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} onOpenDirectoryTerminal={handleOpenDirectoryTerminal} />
                 {showSessionFiles && workspaceSlug && (
                   <FileDropZone workspaceSlug={workspaceSlug} sessionId={sessionId} target="session" onFilesUploaded={handleFilesUploaded} onFilesAttached={handleSessionFilesAttached} onAttachFolder={handleAttachSessionFolder} onFoldersDropped={handleSessionFoldersDropped} />
                 )}
@@ -1706,6 +1747,11 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
             onOpenWorkspaceComponent={(component) => {
               setWorkspaceComponentTabs((previous) => previous.includes(component) ? previous : [...previous, component])
               handleWorkspaceTabChange(component)
+            }}
+            onOpenVault={() => {
+              setWorkspaceComponentTabs((previous) => previous.includes('vault') ? previous : [...previous, 'vault'])
+              setIsOpen(true)
+              handleWorkspaceTabChange('vault')
             }}
             visibleTabs={split ? { left: split.leftTab, right: split.rightTab } : undefined}
             focusedPane={split?.focusedPane}
@@ -2113,21 +2159,27 @@ function AttachedDirTree({ dirPath, onDetach, selectedPaths, onSelect, refreshVe
                   onOpenDirectoryTerminal(dirPath, dirName)
                 }}
               >
-                <SquareTerminal className="size-3.5" />
+                <Terminal className="size-3.5" />
               </button>
             </TooltipTrigger>
             <TooltipContent side="left">在右侧标签中打开终端</TooltipContent>
           </Tooltip>
         )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="relative z-10 h-6 w-6 mr-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-          onClick={(e) => { e.stopPropagation(); onDetach() }}
-        >
-          <X className="size-3" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={`解除附加目录 ${dirName}`}
+              className="relative z-10 h-6 w-6 mr-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+              onClick={(e) => { e.stopPropagation(); onDetach() }}
+            >
+              <X className="size-3" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left">解除附加目录</TooltipContent>
+        </Tooltip>
       </div>
       {expanded && (
         <div className="relative">
@@ -2404,7 +2456,7 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
                   onOpenDirectoryTerminal(currentPath, currentName)
                 }}
               >
-                <SquareTerminal className="size-3.5" />
+                <Terminal className="size-3.5" />
               </button>
             </TooltipTrigger>
             <TooltipContent side="left">在右侧标签中打开终端</TooltipContent>
