@@ -13,6 +13,7 @@ import { PROMA_DEFAULT_PERMISSION_MODE } from '@proma/shared'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
 import type { SessionFileChange } from '@/lib/session-file-changes'
+import type { RightWorkspaceSplitState } from '@/lib/right-workspace-split'
 
 /** 活动状态 */
 export type ActivityStatus = 'pending' | 'running' | 'completed' | 'error' | 'backgrounded'
@@ -250,12 +251,12 @@ export function isActivityGroup(item: ActivityGroup | ToolActivity): item is Act
 }
 
 
-/** 待自动发送的 Agent 提示（从设置页"对话完成配置"触发） */
+/** 待预填到新 Agent 会话输入框的提示词；仅由用户手动发送。 */
 export interface AgentPendingPrompt {
   sessionId: string
   message: string
   additionalDirectories?: string[]
-  /** 自动发送时注入的 Todo 引用，确保 Agent 读取最新记录而非仅依赖提示文本。 */
+  /** 保留调用方关联的 Todo 引用元数据，发送时由用户确认。 */
   mentionedTodoIds?: string[]
 }
 
@@ -649,8 +650,8 @@ export function pruneFileBrowserStateMap<T>(state: Map<string, T>, retainedSessi
  * 工作区级组件：内容归属项目而非单个会话，但在当前会话的右侧工作区中呈现。
  * 同一项目下的打开状态跨会话保留；关闭一个组件不会影响其他项目。
  */
-export type WorkspaceComponentTab = 'todos' | 'calendar' | 'automations' | 'skills' | 'mcp' | 'memory'
-export const WORKSPACE_COMPONENT_TABS: readonly WorkspaceComponentTab[] = ['todos', 'calendar', 'automations', 'skills', 'mcp', 'memory']
+export type WorkspaceComponentTab = 'todos' | 'calendar' | 'automations' | 'skills' | 'mcp' | 'memory' | 'vault'
+export const WORKSPACE_COMPONENT_TABS: readonly WorkspaceComponentTab[] = ['todos', 'calendar', 'automations', 'skills', 'mcp', 'memory', 'vault']
 
 export function isWorkspaceComponentTab(tab: AgentSidePanelTab | string): tab is WorkspaceComponentTab {
   return (WORKSPACE_COMPONENT_TABS as readonly string[]).includes(tab)
@@ -797,6 +798,17 @@ export const agentSessionComponentTabsAtomFamily = atomFamily((sessionId: string
 
 /** 侧面板当前工作区：基础视图或某个浏览器网页（per-session Map）。 */
 export const agentDiffPanelTabAtom = atom<Map<string, AgentSidePanelTab | 'browser' | 'preview'>>(new Map())
+
+/** 当前 renderer 运行期内的右侧双 Pane 状态；动态 Tab 失效时由 SidePanel 主动清理。 */
+export const agentSidePanelSplitMapAtom = atom<Map<string, RightWorkspaceSplitState>>(new Map())
+
+/** 双 Pane 分隔比例按 Session 持久化，但不持久化可能在重启后失效的动态 Tab ID。 */
+export const agentSidePanelSplitRatioMapAtom = atomWithStorage<Record<string, number>>(
+  'proma-agent-workspace-split-ratio-by-session',
+  {},
+  undefined,
+  { getOnInit: true },
+)
 
 /** Agent 历史中的 Skill 引用请求在 Skills Tab 内打开对应详情。 */
 export interface SkillDetailNavigationRequest {
